@@ -91,7 +91,7 @@ class EventTableDetector:
             return False
         if not self.detect_case_or_activity_column():
             return False
-        print(f"[PASS] {os.path.basename(self.filepath)} - Potential event table detected ✅")
+        print(f"[PASS] {os.path.basename(self.filepath)} - Valid Columns")
         return True
 
 
