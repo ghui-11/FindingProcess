@@ -3,15 +3,36 @@ import numpy as np
 import difflib
 
 def entropy(arr):
+    """
+    Computes entropy of a numpy array.
+    Args:
+        arr (np.ndarray): Array of values.
+    Returns:
+        float: Entropy value.
+    """
     vals, counts = np.unique(arr, return_counts=True)
     prob = counts / counts.sum()
     return -np.sum(prob * np.log2(prob + 1e-9))
 
 def normalize(series):
+    """
+    Normalizes a pandas Series into [0, 1] range.
+    Args:
+        series (pd.Series): Input series.
+    Returns:
+        pd.Series: Normalized series.
+    """
     if series.max() == series.min(): return series * 0
     return (series - series.min()) / (series.max() - series.min())
 
 def avg_levenshtein(strings):
+    """
+    Computes average Levenshtein ratio for a set of strings.
+    Args:
+        strings (iterable): Set of strings.
+    Returns:
+        float: Average ratio.
+    """
     strings = [str(s) for s in set(strings) if pd.notnull(s)]
     if len(strings) < 2: return 1.0
     total, count = 0, 0
@@ -22,6 +43,14 @@ def avg_levenshtein(strings):
     return total / count if count > 0 else 0
 
 def detect_mixed_types(series, sample_size=50):
+    """
+    Detects if a pandas Series contains mixed types.
+    Args:
+        series (pd.Series): Input series.
+        sample_size (int): Number of samples to check.
+    Returns:
+        bool: True if mixed types detected.
+    """
     samples = series.dropna().astype(str).head(sample_size)
     types = set()
     for v in samples:
@@ -32,6 +61,15 @@ def detect_mixed_types(series, sample_size=50):
     return len(types) > 1
 
 def field_screening(df, max_word_threshold=6, attribute_blacklist=None):
+    """
+    Screens dataframe columns for valid candidate fields.
+    Args:
+        df (pd.DataFrame): Input dataframe.
+        max_word_threshold (int): Maximum word count for string columns.
+        attribute_blacklist (list): Columns to exclude.
+    Returns:
+        list: Candidate field names.
+    """
     attribute_blacklist = attribute_blacklist or []
     candidates, N = [], len(df)
     for col in df.columns:
@@ -53,6 +91,16 @@ def field_screening(df, max_word_threshold=6, attribute_blacklist=None):
     return candidates
 
 def field_scoring(df, candidates):
+    """
+    Scores candidate fields for case/activity suitability.
+    Args:
+        df (pd.DataFrame): Input dataframe.
+        candidates (list): Candidate field names.
+    Returns:
+        pd.DataFrame: Scored fields.
+        list: Top case fields.
+        list: Top activity fields.
+    """
     rows, N = [], len(df)
     for col in candidates:
         n_unique = df[col].nunique(dropna=True)
@@ -86,6 +134,7 @@ def field_scoring(df, candidates):
         + 0.2 * (1 - scored["entropy_norm"])
         + 0.3 * scored["sim_norm"]
     )
+    # Keep top two case and top two activity fields
     case_top = scored.sort_values("case_score", ascending=False).head(2)
     act_top = scored.sort_values("act_score", ascending=False).head(2)
     case_fields = list(case_top["field"])

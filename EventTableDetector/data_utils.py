@@ -2,19 +2,43 @@ import pandas as pd
 from dateutil.parser import parse as date_parse
 
 def simple_read_csv(path, sep=',', nrows=None, **kwargs):
+    """
+    Reads a CSV file with basic error tolerance.
+    Args:
+        path (str): Path to CSV file.
+        sep (str): Separator, default ','.
+        nrows (int, optional): Number of rows to read.
+        **kwargs: Other pandas read_csv arguments.
+    Returns:
+        pd.DataFrame: Loaded dataframe.
+    """
     return pd.read_csv(path, sep=sep, nrows=nrows, on_bad_lines='skip', engine='python', **kwargs)
 
 def is_unix_timestamp(s):
+    """
+    Checks if a string is a valid unix timestamp.
+    Args:
+        s (str): Input string.
+    Returns:
+        bool: True if valid unix timestamp, else False.
+    """
     if not isinstance(s, str): s = str(s)
     if not s.isdigit() or len(s) not in (10, 13): return False
     ts = int(s)
-    if len(s) == 10:  # 秒级
+    if len(s) == 10:  # seconds
         return 0 <= ts <= 4102444800
-    elif len(s) == 13:  # 毫秒级
+    elif len(s) == 13:  # milliseconds
         return 0 <= ts // 1000 <= 4102444800
     return False
 
 def is_datetime_like_general(value):
+    """
+    Determines if a value is a general datetime string.
+    Args:
+        value (str): Input value.
+    Returns:
+        bool: True if value is datetime-like.
+    """
     import pandas as pd
     from dateutil.parser import parse as date_parse
     if not isinstance(value, str): value = str(value)
@@ -47,6 +71,15 @@ def is_datetime_like_general(value):
     except: return False
 
 def detect_timestamp_columns_general(df, sample_size=20, threshold=0.5):
+    """
+    Detects timestamp columns in a dataframe by checking sample values.
+    Args:
+        df (pd.DataFrame): Input dataframe.
+        sample_size (int): Number of samples per column.
+        threshold (float): Ratio threshold to decide timestamp column.
+    Returns:
+        list: List of detected timestamp columns.
+    """
     timestamp_cols = []
     for col in df.columns:
         samples = df[col].dropna().astype(str).head(sample_size)
