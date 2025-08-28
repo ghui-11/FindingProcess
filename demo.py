@@ -17,7 +17,7 @@ To use:
 import os
 from EventTableDetector.data_utils import simple_read_csv, detect_timestamp_columns_general
 from EventTableDetector.field_utils import field_screening, field_scoring
-from EventTableDetector.event_structures import wide_to_long, event_combinations
+from EventTableDetector.event_structures import event_combinations
 
 if __name__ == "__main__":
     # Update these paths to your local data files
@@ -31,15 +31,27 @@ if __name__ == "__main__":
 
     # Candidate field screening (excluding timestamps)
     candidates = field_screening(df, attribute_blacklist=timestamp_cols)
-    print("Candidate fields:", candidates)
 
     # Field scoring to select best case/activity fields
     scored, case_fields, act_fields = field_scoring(df, candidates)
     print("Top case fields:", case_fields)
     print("Top activity fields:", act_fields)
 
+    # Choose test type(s) and options for CA validation
+    test_types = ['ks', 'bootstrap']  # Options: ['ks'], ['bootstrap'], ['ks','bootstrap']
+    test_options = {
+        'ks_alpha': 0.1,
+        'bootstrap_alpha': 0.05,
+        'n_bootstrap': 1000
+    }
+
     # Run CA detection and evaluation
-    result = event_combinations(df, act_fields, case_fields, train_features_path)
+    result = event_combinations(
+        df, act_fields, case_fields, train_features_path,
+        test_types=test_types,
+        test_options=test_options,
+        verbose=True
+    )
     if result is not None:
         print("Best CA combination found:", result)
     else:
