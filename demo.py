@@ -1,58 +1,51 @@
-"""
-Demo for EventTableDetector package usage.
+import pandas as pd
+from EventTableDetector.api import (
+    suggest_mandatory_column_candidates,
+    validate_event_log,
+    get_event_log_statistic,
+    get_event_log_quality,
+    convert_to_event_log
+)
 
-This script demonstrates how to:
-    - Load a CSV file
-    - Automatically detect timestamp columns
-    - Screen candidate case/activity fields
-    - Evaluate case/activity combinations using event_structures
+# Set pandas display options for better visibility
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+pd.set_option('display.max_colwidth', 200)
 
-To use:
-    1. Run from the project root directory:
-        python scripts/demo.py
-    2. Ensure EventTableDetector is in the same root directory.
-    3. Update data_path and train_features_path as needed.
-"""
+csv_path = "./BPIC15_1.csv"
 
-import os
-from EventTableDetector.data_utils import simple_read_csv, detect_timestamp_columns_general
-from EventTableDetector.field_utils import field_screening, field_scoring
-from EventTableDetector.event_structures import event_combinations
+# 1. Load the CSV file
+df = pd.read_csv(csv_path, on_bad_lines='skip')
 
-if __name__ == "__main__":
-    # Update these paths to your local data files
-    data_path = "Positiv_pass/BPIC_2012_W_test.csv"
-    train_features_path = "Train/train_features.csv"
+# 2. Suggest all possible (timestamp, case, activity) combinations using baseline logistic_lr
+params = {
+    "baseline_mode": "logistic_lr",  # Use enhanced baseline with logistic regression
+    "train_dir": "./Train"
+}
+candidates = suggest_mandatory_column_candidates(
+    df,
+    method="baseline",   # Use baseline (not ML model for this demo)
+    params=params,
+    verbose=True
+)
+print("Candidate (timestamp, case, activity) columns (baseline logistic_lr):", candidates)
 
-    # Load data
-    df = simple_read_csv(data_path, nrows=1000)
-    timestamp_cols = detect_timestamp_columns_general(df)
-    print("Detected timestamp columns:", timestamp_cols)
+# 3. Validate the event log structure using these candidates
+is_log, col_mapping = validate_event_log(df, candidates=candidates, verbose=True)
+print("Is input a valid event log?", is_log)
+print("Best column mapping:", col_mapping)
 
-    # Candidate field screening (excluding timestamps)
-    candidates = field_screening(df, attribute_blacklist=timestamp_cols)
+# 4. If valid, get statistics and quality, convert to standard event log and preview
+if is_log:
+    stats = get_event_log_statistic(df, col_mapping['case'], col_mapping['activity'])
+    print("Event log statistics:", stats)
 
-    # Field scoring to select best case/activity fields
-    scored, case_fields, act_fields = field_scoring(df, candidates)
-    print("Top case fields:", case_fields)
-    print("Top activity fields:", act_fields)
+    quality = get_event_log_quality(df, col_mapping['case'], col_mapping['activity'])
+    print("Event log quality:", quality)
 
-    # Choose test type(s) and options for CA validation
-    test_types = ['ks', 'bootstrap']  # Options: ['ks'], ['bootstrap'], ['ks','bootstrap']
-    test_options = {
-        'ks_alpha': 0.1,
-        'bootstrap_alpha': 0.05,
-        'n_bootstrap': 1000
-    }
-
-    # Run CA detection and evaluation
-    result = event_combinations(
-        df, act_fields, case_fields, train_features_path,
-        test_types=test_types,
-        test_options=test_options,
-        verbose=True
-    )
-    if result is not None:
-        print("Best CA combination found:", result)
-    else:
-        print("No valid CA combination detected.")
+    event_log_df = convert_to_event_log(df, col_mapping['case'], col_mapping['activity'], col_mapping['timestamp'])
+    print("Standard event log preview:")
+    print(event_log_df.head())
+else:
+    print("Input data cannot be automatically recognized as an event log.")
