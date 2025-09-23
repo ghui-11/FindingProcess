@@ -53,12 +53,12 @@ def detect_table_type(df: pd.DataFrame, verbose: bool = False) -> str:
     if N >= 3:
         non_nan_counts = [df[c].notna().sum() for c in timestamp_cols]
         total_rows = len(df)
-        if verbose:
-            print(f"Timestamp columns non-NaN counts: {non_nan_counts} (total rows: {total_rows})")
+        # if verbose:
+        #     print(f"Timestamp columns non-NaN counts: {non_nan_counts} (total rows: {total_rows})")
         if all(cnt > 0.7 * total_rows for cnt in non_nan_counts):
             std_ratio = pd.Series(non_nan_counts).std() / (total_rows + 1e-9)
-            if verbose:
-                print(f"Std ratio of timestamp non-NaN counts: {std_ratio}")
+            # if verbose:
+            #     print(f"Std ratio of timestamp non-NaN counts: {std_ratio}")
             if std_ratio < 0.3:
                 if verbose:
                     print("Table type judged as wide (timestamp columns are evenly filled).")
@@ -100,8 +100,8 @@ def ensure_long_format(df: pd.DataFrame, case_candidates=None, verbose: bool = F
         pd.DataFrame: Long-format DataFrame.
     """
     table_type = detect_table_type(df, verbose=verbose)
-    if verbose:
-        print(f"ensure_long_format: detected table type is '{table_type}'")
+    # if verbose:
+    #     print(f"ensure_long_format: detected table type is '{table_type}'")
     if table_type == 'wide':
         timestamp_cols = detect_timestamp_columns_general(df)
         if not case_candidates:

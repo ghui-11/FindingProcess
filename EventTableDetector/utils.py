@@ -62,6 +62,30 @@ def avg_levenshtein(strings):
             count += 1
     return total / count if count > 0 else 0
 
+def std_char_count(col_vals):
+    return np.std([len(str(v)) for v in col_vals])
+
+
+def get_column_features_for_classifier(series: pd.Series) -> list:
+    """
+    Extract normalized feature vector for a column.
+
+    Args:
+        series (pd.Series): Input column.
+
+    Returns:
+        list: [n_unique_ratio_norm, max_freq_norm, entropy_norm, sim_norm]
+    """
+    N = len(series)
+    n_unique = series.nunique(dropna=True)
+    n_unique_ratio = n_unique / N
+    vc = series.value_counts(dropna=True)
+    max_freq = vc.iloc[0] / N if len(vc) > 0 else 0.0
+    ent = entropy(series.dropna().values)
+    sim = avg_levenshtein(series.dropna().unique())
+    std_length = std_char_count(series.dropna().values)
+    return [n_unique_ratio, max_freq, ent, sim, std_length]
+
 def detect_mixed_types(series, sample_size=50):
     """
     Detect if a pandas Series contains mixed types.
@@ -280,24 +304,3 @@ def detect_timestamp_columns_general(df, sample_size=20, threshold=0.5):
         if valid_count / len(samples) >= threshold:
             timestamp_cols.append(col)
     return timestamp_cols
-
-def get_column_features_for_classifier(series: pd.Series) -> list:
-    """
-    Extract normalized feature vector for a column.
-
-    Args:
-        series (pd.Series): Input column.
-
-    Returns:
-        list: [n_unique_ratio_norm, max_freq_norm, entropy_norm, sim_norm]
-    """
-    N = len(series)
-    n_unique = series.nunique(dropna=True)
-    n_unique_ratio = n_unique / N
-    vc = series.value_counts(dropna=True)
-    max_freq = vc.iloc[0] / N if len(vc) > 0 else 0.0
-    ent = entropy(series.dropna().values)
-    sim = avg_levenshtein(series.dropna().unique())
-    values = pd.Series([n_unique_ratio, max_freq, ent, sim])
-    normed = (values - values.min()) / (values.max() - values.min()) if values.max() > values.min() else values*0
-    return normed.tolist()

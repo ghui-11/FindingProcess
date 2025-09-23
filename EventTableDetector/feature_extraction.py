@@ -76,6 +76,23 @@ def extract_train_features(
         variant_count = variants.nunique() if unique_case_count > 0 else 0
         avg_unique_acts_per_trace = variants.apply(lambda x: len(set(x))).mean() if unique_case_count > 0 else 0
 
+        # variant_count / case_count
+        variant_ratio = variant_count / unique_case_count if unique_case_count > 0 else 0
+
+        #  avg_events_per_case / unique_activity_count
+        avg_events_per_case_ratio = avg_events_per_case / unique_activity_count if unique_activity_count > 0 else 0
+
+        # 3. DFG relation
+        dfg_density = np.nan
+        if time_col:
+            try:
+                pairs = df_filtered.sort_values([case_col, time_col])
+                pairs = pairs.groupby(case_col)[act_col].apply(lambda x: list(zip(x[:-1], x[1:]))).explode()
+                dfg_pattern_count = pairs.nunique()
+                dfg_density = dfg_pattern_count / (unique_activity_count ** 2) if unique_activity_count > 0 else 0
+            except Exception as e:
+                print(f"DFG density calculation error in {file}: {e}")
+
         feature_list.append({
             'file': file,
             'total_event_count': total_event_count,
@@ -85,6 +102,9 @@ def extract_train_features(
             'avg_events_per_case': avg_events_per_case,
             'variant_count': variant_count,
             'avg_unique_acts_per_trace': avg_unique_acts_per_trace,
+            'variant_ratio': variant_ratio,
+            'avg_events_per_case_ratio': avg_events_per_case_ratio,
+            'dfg_density': dfg_density,
         })
 
     features_df = pd.DataFrame(feature_list)
@@ -116,11 +136,9 @@ def extract_column_features_and_labels_from_dir(
     files = [f for f in os.listdir(train_dir) if f.endswith('.csv')]
     for file in files:
         df = pd.read_csv(os.path.join(train_dir, file), nrows=nrows)
-        dt_cols = [col for col in df.columns if any(is_datetime_like_general(str(v)) for v in df[col].dropna().head(10))]
-        df_no_dt = df.drop(columns=dt_cols)
-        candidates = field_screening(df_no_dt, max_word_threshold=max_word_threshold, attribute_blacklist=None, timestamp_cols=None)
+        candidates = field_screening(df, max_word_threshold=max_word_threshold)
         for col in candidates:
-            feats = get_column_features_for_classifier(df_no_dt[col])
+            feats = get_column_features_for_classifier(df[col])
             if col == "case:concept:name":
                 label = "case"
             elif col == "concept:name":
@@ -129,7 +147,7 @@ def extract_column_features_and_labels_from_dir(
                 label = "irrelevant"
             data.append(feats + [label])
     X = pd.DataFrame([row[:-1] for row in data],
-                     columns=["n_unique_ratio_norm", "max_freq_norm", "entropy_norm", "sim_norm"])
+                     columns=["n_unique_ratio", "max_freq", "entropy", "sim", "std_length"])
     y = pd.Series([row[-1] for row in data], name="label")
     if verbose:
         print(f"Extracted features for {len(y)} columns from {len(files)} files.")

@@ -16,7 +16,6 @@ from .statistics import (
     validate_event_log,
 )
 
-
 __all__ = [
     "suggest_mandatory_column_candidates",
     "validate_event_log",

@@ -6,46 +6,54 @@ from EventTableDetector.api import (
     get_event_log_quality,
     convert_to_event_log
 )
+from EventTableDetector.feature_extraction import extract_train_features
 
-# Set pandas display options for better visibility
-pd.set_option('display.max_rows', None)
-pd.set_option('display.max_columns', None)
-pd.set_option('display.width', 1000)
-pd.set_option('display.max_colwidth', 200)
 
-csv_path = "./BPIC15_1.csv"
+# extract_train_features(
+#     train_dir="C:/programmierung/Python/FindingProcess/Train",  # 你的训练集目录
+#     output_name="train_features.csv",  # 输出文件名
+#     display_result=True               # 是否打印结果
+# )
 
+
+csv_path = "./Positive__/BPIC15_1.csv"
+ #"./Positive__/bank_transactions_data_2.csv"
+#"C:/programmierung/Python/FindingProcess/positive_fialed/Incident_Management_CSV.csv"
+# ./Positive__/BPIC15_1.csv
 # 1. Load the CSV file
-df = pd.read_csv(csv_path, on_bad_lines='skip')
+df = pd.read_csv(csv_path, on_bad_lines='skip',sep=',')
 
-# 2. Suggest all possible (timestamp, case, activity) combinations using baseline logistic_lr
-params = {
-    "baseline_mode": "logistic_lr",  # Use enhanced baseline with logistic regression
-    "train_dir": "./Train"
-}
+
+# # 2. Suggest all possible (timestamp, case, activity) combinations using baseline logistic_lr
+# params = {
+#     "baseline_mode": "logistic_lr",  # Use enhanced baseline with logistic regression
+#     "train_dir": "./Train"
+# }
 candidates = suggest_mandatory_column_candidates(
     df,
-    method="baseline",   # Use baseline (not ML model for this demo)
-    params=params,
+    method="rf",   # Use baseline (not ML model for this demo)
+    params=None,
     verbose=True
 )
 print("Candidate (timestamp, case, activity) columns (baseline logistic_lr):", candidates)
 
 # 3. Validate the event log structure using these candidates
-is_log, col_mapping = validate_event_log(df, candidates=candidates, verbose=True)
+#
+
+is_log, col_mapping = validate_event_log(df, test_types=['lof', 'isoforest','svdd','dbscan'],verbose=True)
 print("Is input a valid event log?", is_log)
-print("Best column mapping:", col_mapping)
 
-# 4. If valid, get statistics and quality, convert to standard event log and preview
-if is_log:
-    stats = get_event_log_statistic(df, col_mapping['case'], col_mapping['activity'])
-    print("Event log statistics:", stats)
 
-    quality = get_event_log_quality(df, col_mapping['case'], col_mapping['activity'])
-    print("Event log quality:", quality)
-
-    event_log_df = convert_to_event_log(df, col_mapping['case'], col_mapping['activity'], col_mapping['timestamp'])
-    print("Standard event log preview:")
-    print(event_log_df.head())
-else:
-    print("Input data cannot be automatically recognized as an event log.")
+# # 4. If valid, get statistics and quality, convert to standard event log and preview
+# if is_log:
+#     stats = get_event_log_statistic(df, col_mapping['case'], col_mapping['activity'])
+#     print("Event log statistics:", stats)
+#
+#     quality = get_event_log_quality(df, col_mapping['case'], col_mapping['activity'])
+#     print("Event log quality:", quality)
+#
+#     event_log_df = convert_to_event_log(df, col_mapping['case'], col_mapping['activity'], col_mapping['timestamp'])
+#     print("Standard event log preview:")
+#     print(event_log_df.head())
+# else:
+#     print("Input data cannot be automatically recognized as an event log.")
