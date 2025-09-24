@@ -249,6 +249,8 @@ def voting(results, test_types, vote='majority'):
         return all(ok_list)
     elif vote == 'any':
         return any(ok_list)
+    elif vote == 'half':
+        return sum(ok_list) >= (len(ok_list) // 2)
     else:
         return False
 
@@ -309,17 +311,20 @@ def validate_event_log(
         Tuple[bool, Dict[str, str]]: (is_event_log, mapping_dict). If true, mapping_dict contains the validated column mapping.
     """
     # Ensure DataFrame is in long format
-    long_df = ensure_long_format(df, verbose=verbose)
+    long_df = ensure_long_format(df, verbose=False)
     # If no candidates provided, generate them
     if candidates is None:
         if verbose:
             print("No candidates provided, calling suggest_mandatory_column_candidates...")
         candidates = suggest_mandatory_column_candidates(df, method="rf", verbose=verbose)
+    # If no valid candidates
+    if not candidates:
+        if verbose:
+            print("No valid candidates. Event log validation FAILED.")
+        return False, {}
     # Default train features path
     if train_features_path is None:
         train_features_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'Train', 'TrainMatrix', 'train_features.csv'))
-    # Get timestamp candidates if available
-    timestamp_candidates = [c[0] for c in candidates] if candidates and len(candidates[0]) == 3 else []
 
     # Iterate through all combinations
     for t, c, a in candidates:

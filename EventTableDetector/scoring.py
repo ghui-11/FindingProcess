@@ -48,17 +48,23 @@ def suggest_mandatory_column_candidates(
     """
     df = df.head(1000)
     black_list = black_list or DEFAULT_BLACK_LIST
-    long_df = ensure_long_format(df, verbose=verbose)
+    try:
+        long_df = ensure_long_format(df, verbose=verbose)
+    except ValueError as e:
+        if verbose:
+            print(f"Error: {e}")
+        return []
     timestamp_cols = detect_timestamp_columns_general(long_df)
     candidates = field_screening(long_df, attribute_blacklist=black_list, timestamp_cols=timestamp_cols)
     candidates_no_datetime = filter_datetime_columns(long_df, candidates)
     candidates_screened = candidates_no_datetime
-    if verbose:
-        print(f"Candidate fields after screening: {candidates_screened}")
     if len(candidates_screened) < 2:
         if verbose:
-            print("Not enough candidate fields after screening.")
+            print("Not enough candidate fields after screening. Not a valid event log.")
         return []
+    if verbose:
+        print(f"Candidate fields after screening: {candidates_screened}")
+
     train_dir = params["train_dir"] if params and "train_dir" in params else "./Train"
 
     if method in ("logistic", "tree", "rf", "gb"):

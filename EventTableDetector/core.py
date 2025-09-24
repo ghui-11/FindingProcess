@@ -1,8 +1,5 @@
-"""
-Core table structure transformation and detection utilities for eventlog processing.
-"""
-
 import pandas as pd
+import re
 from typing import List, Optional
 
 from .utils import (
@@ -14,6 +11,12 @@ def is_caseid_candidate(series: pd.Series, threshold: float = 0.98) -> bool:
     """
     Determine if a pandas Series is a candidate for a case id column.
 
+    Criteria:
+        - No missing values.
+        - High uniqueness ratio.
+        - Not purely numeric (including no sign or decimal point).
+        - All values' character length < 100.
+
     Args:
         series (pd.Series): The column to check.
         threshold (float): Minimum unique ratio to qualify as case id.
@@ -23,7 +26,18 @@ def is_caseid_candidate(series: pd.Series, threshold: float = 0.98) -> bool:
     """
     if series.isna().sum() > 0:
         return False
-    return series.nunique(dropna=True) / len(series) >= threshold
+    n_unique_ratio = series.nunique(dropna=True) / len(series)
+    if n_unique_ratio < threshold:
+        return False
+    vals = series.astype(str)
+    # Exclude if all values are purely numeric (with optional sign/decimal)
+    is_numeric_like = vals.apply(lambda x: bool(re.fullmatch(r"[\+\-]?\d+(\.\d+)?", x)))
+    if is_numeric_like.all():
+        return False
+    # Exclude if any value is too long
+    if (vals.apply(len) >= 100).any():
+        return False
+    return True
 
 def detect_table_type(df: pd.DataFrame, verbose: bool = False) -> str:
     """
@@ -34,12 +48,16 @@ def detect_table_type(df: pd.DataFrame, verbose: bool = False) -> str:
         verbose (bool): If True, print debug info.
 
     Returns:
-        str: 'long' or 'wide'
+        str: 'long' or 'wide' or 'No' (if no timestamp columns).
     """
     timestamp_cols = detect_timestamp_columns_general(df)
     N = len(timestamp_cols)
     if verbose:
-        print(f"Detected timestamp columns: {timestamp_cols} (count: {N})")
+        print(f"Detected timestamp columns: {timestamp_cols}")
+    if N == 0:
+        if verbose:
+            print("No timestamp columns detected. Not event log.")
+        return 'No'
     if N <= 2:
         if verbose:
             print("Table type judged as long (<=2 timestamp columns).")
@@ -53,12 +71,8 @@ def detect_table_type(df: pd.DataFrame, verbose: bool = False) -> str:
     if N >= 3:
         non_nan_counts = [df[c].notna().sum() for c in timestamp_cols]
         total_rows = len(df)
-        # if verbose:
-        #     print(f"Timestamp columns non-NaN counts: {non_nan_counts} (total rows: {total_rows})")
         if all(cnt > 0.7 * total_rows for cnt in non_nan_counts):
             std_ratio = pd.Series(non_nan_counts).std() / (total_rows + 1e-9)
-            # if verbose:
-            #     print(f"Std ratio of timestamp non-NaN counts: {std_ratio}")
             if std_ratio < 0.3:
                 if verbose:
                     print("Table type judged as wide (timestamp columns are evenly filled).")
@@ -85,6 +99,7 @@ def wide_to_long(df: pd.DataFrame, timestamp_cols: List[str], case_col: str) -> 
         .dropna(subset=['timestamp'])
         .rename(columns={case_col: 'case'})
     )
+    long_df = long_df.drop_duplicates()
     return long_df
 
 def ensure_long_format(df: pd.DataFrame, case_candidates=None, verbose: bool = False) -> pd.DataFrame:
@@ -98,15 +113,36 @@ def ensure_long_format(df: pd.DataFrame, case_candidates=None, verbose: bool = F
 
     Returns:
         pd.DataFrame: Long-format DataFrame.
+    Raises:
+        ValueError: If no suitable case id column found in wide mode.
     """
     table_type = detect_table_type(df, verbose=verbose)
-    # if verbose:
-    #     print(f"ensure_long_format: detected table type is '{table_type}'")
+    if table_type == 'No':
+        raise ValueError("No timestamp columns detected. Event log validation FAILED.")
     if table_type == 'wide':
         timestamp_cols = detect_timestamp_columns_general(df)
+        if not candidates:
+            if verbose:
+                print("No valid candidates. Event log validation FAILED.")
         if not case_candidates:
-            case_candidates = [col for col in df.columns if df[col].nunique() > 1 and col not in timestamp_cols]
-        case_col = case_candidates[0]
+            candidates = [
+                col for col in df.columns
+                if col not in timestamp_cols and is_caseid_candidate(df[col])
+            ]
+            if candidates:
+                case_col = max(candidates, key=lambda c: df[c].nunique())
+            else:
+                id_like = [col for col in df.columns if 'id' in col.lower()]
+                if id_like:
+                    case_col = max(id_like, key=lambda c: df[c].nunique() / len(df))
+                else:
+                    # # No suitable case id found!
+                    # if verbose:
+                    #     print("No suitable case id column  found for wide table, cannot convert to long format.")
+                    raise ValueError("No suitable case id column found for wide table, cannot convert to long format.")
+        else:
+            case_col = case_candidates[0]
+
         if verbose:
             print(f"Converting wide to long using case column: {case_col} and timestamp columns: {timestamp_cols}")
         df_long = wide_to_long(df, timestamp_cols, case_col)
