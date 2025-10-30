@@ -10,9 +10,9 @@ from EventTableDetector.feature_extraction import extract_train_features
 
 
 # extract_train_features(
-#     train_dir="C:/programmierung/Python/FindingProcess/Train",  # 你的训练集目录
-#     output_name="train_features.csv",  # 输出文件名
-#     display_result=True               # 是否打印结果
+#     train_dir="C:/programmierung/Python/FindingProcess/Train",
+#     output_name="train_features.csv",
+#     display_result=True
 # )
 
 wide_data = {
@@ -24,9 +24,6 @@ wide_data = {
 }
 df_wide = pd.DataFrame(wide_data)
 
-# 自动分支会处理3个时间戳列
-# Path B-1: 选择最优时间戳，进入candidate generation
-# Path B-2: melt所有时间戳，直接进入validation
 is_valid, result = validate_event_log(
     df_wide,
     test_types=['lof', 'isoforest','svdd','dbscan'],
