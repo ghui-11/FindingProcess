@@ -11,7 +11,7 @@ from sklearn.ensemble import IsolationForest
 from sklearn.svm import OneClassSVM
 from sklearn.cluster import DBSCAN
 
-from .core import ensure_long_format
+from .core import ensure_long_format, preprocess_and_generate_candidates
 from .scoring import suggest_mandatory_column_candidates
 
 def get_event_log_statistic(df: pd.DataFrame, case: str, activity: str, timestamp: Optional[str] = None) -> dict:
@@ -188,7 +188,7 @@ def detect_isolation_forest(train_matrix, new_vector, verbose=False):
         print(f"Isolation Forest score: {iso_score:.4f}, IF prediction: {'Outlier' if iso_pred == -1 else 'Inlier'}")
     return {"ok": iso_pred != -1, "detail": {"iso_score": iso_score, "iso_pred": int(iso_pred)}}
 
-def detect_svdd(train_matrix, new_vector, verbose=False):
+def detect_ocsvm(train_matrix, new_vector, verbose=False):
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_matrix)
     new_scaled = scaler.transform(np.array(new_vector).reshape(1, -1))
@@ -197,8 +197,8 @@ def detect_svdd(train_matrix, new_vector, verbose=False):
     svdd_score = svdd.decision_function(new_scaled)[0]
     svdd_pred = svdd.predict(new_scaled)[0]
     if verbose:
-        print(f"SVDD score: {svdd_score:.4f}, SVDD prediction: {'Outlier' if svdd_pred == -1 else 'Inlier'}")
-    return {"ok": svdd_pred != -1, "detail": {"svdd_score": svdd_score, "svdd_pred": int(svdd_pred)}}
+        print(f"OCSVM score: {svdd_score:.4f}, OCSVM prediction: {'Outlier' if svdd_pred == -1 else 'Inlier'}")
+    return {"ok": svdd_pred != -1, "detail": {"ocsvm_score": svdd_score, "ocsvm_pred": int(svdd_pred)}}
 
 def detect_dbscan(train_matrix, new_vector, verbose=False):
     scaler = StandardScaler()
@@ -233,8 +233,8 @@ def run_feature_tests(features, train_matrix, test_types=['ks'], test_options=No
             result['lof'] = detect_lof(train_matrix, features, verbose=verbose)
         elif test_type == 'isoforest':
             result['isoforest'] = detect_isolation_forest(train_matrix, features, verbose=verbose)
-        elif test_type == 'svdd':
-            result['svdd'] = detect_svdd(train_matrix, features, verbose=verbose)
+        elif test_type == 'ocsvm':
+            result['ocsvm'] = detect_ocsvm(train_matrix, features, verbose=verbose)
         elif test_type == 'dbscan':
             result['dbscan'] = detect_dbscan(train_matrix, features, verbose=verbose)
     return result
@@ -293,68 +293,100 @@ def validate_event_log(
     test_options=None,
     vote='majority',
     train_features_path=None,
-    verbose: bool = False
-) -> Tuple[bool, Dict[str, str]]:
+    params=None,
+    verbose: bool = False,
+    auto_branch: bool = True,
+    return_all_novelty: bool = False
+) -> Tuple[bool, Dict[str, str]] or List[Dict]:
     """
-    Validate whether the given DataFrame is an event log, based on candidate (timestamp, case, activity) combinations.
-
-    Args:
-        df (pd.DataFrame): Input DataFrame to validate.
-        candidates (list, optional): List of (timestamp, case, activity) column combinations. If None, will be auto-generated.
-        test_types (list): List of test types to apply for validation.
-        test_options: Additional options for the tests.
-        vote (str): Voting strategy ('majority', 'all', 'any') to determine validation pass within EACH combination.
-        train_features_path: Path to training features CSV.
-        verbose (bool): If True, print detailed debug info.
-
-    Returns:
-        Tuple[bool, Dict[str, str]]: (is_event_log, mapping_dict). If true, mapping_dict contains the validated column mapping.
+    If return_all_novelty=True, always returns a list of candidate dicts (may be empty).
     """
-    # Ensure DataFrame is in long format
-    long_df = ensure_long_format(df, verbose=False)
-    # If no candidates provided, generate them
-    if candidates is None:
-        if verbose:
-            print("No candidates provided, calling suggest_mandatory_column_candidates...")
-        candidates = suggest_mandatory_column_candidates(df, method="rf", verbose=verbose)
-    # If no valid candidates
-    if not candidates:
-        if verbose:
-            print("No valid candidates. Event log validation FAILED.")
-        return False, {}
-    # Default train features path
     if train_features_path is None:
         train_features_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'Train', 'TrainMatrix', 'train_features.csv'))
 
-    # Iterate through all combinations
-    for t, c, a in candidates:
-        if verbose:
-            print(f"Validating combination: timestamp={t}, case={c}, activity={a}")
-        res_list = event_combinations(
-            long_df, [a], [c], train_features_path,
-            test_types=test_types, test_options=test_options, verbose=verbose,
-            timestamp_candidates=[t] if t else [],
-            vote=vote
-        )
-        # Voting is applied to the test results INSIDE EACH combination.
-        # If any combination passes, return immediately as valid.
-        if res_list:
-            res = res_list[0]
-            if res["pass"]:  # This combination passed the vote among its tests
-                if verbose:
-                    print(f"Combination {t}, {c}, {a} PASSED all tests. Event log validation PASSED.")
-                return True, {'timestamp': t, 'case': c, 'activity': a, "test_result": res.get("test_result", {})}
-            else:
-                if verbose:
-                    print(f"Combination {t}, {c}, {a} FAILED one or more tests.")
-        else:
+    if auto_branch and candidates is None:
+        try:
+            event_table_candidates = preprocess_and_generate_candidates(df, verbose=verbose)
+        except ValueError as e:
             if verbose:
-                print(f"Combination FAILED: {t}, {c}, {a}")
-    # If none of the combinations passed, return False
-    if verbose:
-        print("Event log validation FAILED. No combination satisfied the requirement.")
-    if candidates:
-        t, c, a = candidates[0]
-        return False, {'timestamp': t, 'case': c, 'activity': a}
-    else:
-        return False, {}
+                print(f"Branching preprocessing failed: {e}")
+            if return_all_novelty:
+                return []
+            return False, {}
+        if not event_table_candidates:
+            if verbose:
+                print("No event table candidates generated.")
+            if return_all_novelty:
+                return []
+            return False, {}
+
+        all_candidate_results = []
+        for idx, candidate in enumerate(event_table_candidates):
+            candidate_df = candidate['df']
+            path_type = candidate['path_type']
+            requires_gen = candidate['requires_candidate_generation']
+            if requires_gen:
+                try:
+                    long_df = ensure_long_format(candidate_df, verbose=False)
+                except ValueError:
+                    continue
+                combinations = suggest_mandatory_column_candidates(
+                    long_df, method="rf",  params=params, verbose=verbose
+                )
+                if not combinations:
+                    continue
+                for t, c, a in combinations:
+                    res_list = event_combinations(
+                        long_df, [a], [c], train_features_path,
+                        test_types=test_types, test_options=test_options, verbose=verbose,
+                        timestamp_candidates=[t] if t else [],
+                        vote=vote
+                    )
+                    if res_list:
+                        res = res_list[0]
+                        novelty_results = {k: res['test_result'][k]['ok'] for k in test_types if k in res['test_result']}
+                        candidate_result = {
+                            'timestamp': t,
+                            'case': c,
+                            'activity': a,
+                            'novelty_results': novelty_results,
+                            'source_path': path_type,
+                        }
+                        all_candidate_results.append(candidate_result)
+                        if not return_all_novelty:
+                            if voting(res['test_result'], test_types, vote):
+                                return True, candidate_result
+            else:
+                case_col = candidate.get('case_col')
+                activity_col = candidate.get('activity_col')
+                timestamp_col = candidate.get('timestamp_col')
+                if not all([case_col, activity_col, timestamp_col]):
+                    continue
+                res_list = event_combinations(
+                    candidate_df, [activity_col], [case_col], train_features_path,
+                    test_types=test_types, test_options=test_options, verbose=verbose,
+                    timestamp_candidates=[timestamp_col] if timestamp_col else [],
+                    vote=vote
+                )
+                if res_list:
+                    res = res_list[0]
+                    novelty_results = {k: res['test_result'][k]['ok'] for k in test_types if k in res['test_result']}
+                    candidate_result = {
+                        'timestamp': timestamp_col,
+                        'case': case_col,
+                        'activity': activity_col,
+                        'novelty_results': novelty_results,
+                        'source_path': path_type,
+                    }
+                    all_candidate_results.append(candidate_result)
+                    if not return_all_novelty:
+                        if voting(res['test_result'], test_types, vote):
+                            return True, candidate_result
+        if return_all_novelty:
+            return all_candidate_results
+        else:
+            return False, {}
+    # legacy mode (if you need, fill here)
+    if return_all_novelty:
+        return []
+    return False, {}

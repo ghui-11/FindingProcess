@@ -67,7 +67,7 @@ def suggest_mandatory_column_candidates(
 
     train_dir = params["train_dir"] if params and "train_dir" in params else "./Train"
 
-    if method in ("logistic", "tree", "rf", "gb"):
+    if method in ("logistic", "tree", "rf", "gb", 'svm'):
         try:
             case_model, act_model, scaler, feature_names = load_case_act_classifiers(method=method)
             if verbose:

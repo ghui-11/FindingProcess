@@ -1,10 +1,11 @@
 import pandas as pd
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .utils import (
     detect_timestamp_columns_general,
     is_datetime_like_general,
+    select_primary_timestamp,
 )
 
 def is_caseid_candidate(series: pd.Series, threshold: float = 0.98) -> bool:
@@ -121,9 +122,6 @@ def ensure_long_format(df: pd.DataFrame, case_candidates=None, verbose: bool = F
         raise ValueError("No timestamp columns detected. Event log validation FAILED.")
     if table_type == 'wide':
         timestamp_cols = detect_timestamp_columns_general(df)
-        if not candidates:
-            if verbose:
-                print("No valid candidates. Event log validation FAILED.")
         if not case_candidates:
             candidates = [
                 col for col in df.columns
@@ -136,9 +134,6 @@ def ensure_long_format(df: pd.DataFrame, case_candidates=None, verbose: bool = F
                 if id_like:
                     case_col = max(id_like, key=lambda c: df[c].nunique() / len(df))
                 else:
-                    # # No suitable case id found!
-                    # if verbose:
-                    #     print("No suitable case id column  found for wide table, cannot convert to long format.")
                     raise ValueError("No suitable case id column found for wide table, cannot convert to long format.")
         else:
             case_col = case_candidates[0]
@@ -195,3 +190,186 @@ def convert_to_event_log(df: pd.DataFrame, case: str, activity: str, timestamp: 
     if verbose:
         print("Event log preview:\n", event_log.head())
     return event_log
+
+
+def melt_case_level_table(
+    df: pd.DataFrame,
+    timestamp_cols: List[str],
+    verbose: bool = False
+) -> Tuple[pd.DataFrame, str, str, str]:
+    """
+    Convert a wide-format DataFrame (case-level) to long format by melting all timestamp columns.
+    
+    This function:
+    1. Identifies a case_id column
+    2. Melts all timestamp columns into (case_id, activity, timestamp) format
+    3. Returns the melted DataFrame and column names
+    
+    Args:
+        df (pd.DataFrame): The wide-format DataFrame.
+        timestamp_cols (List[str]): All timestamp column names.
+        verbose (bool): If True, print debug info.
+    
+    Returns:
+        Tuple[pd.DataFrame, str, str, str]: (melted_df, case_col, activity_col, timestamp_col)
+    
+    Raises:
+        ValueError: If no suitable case_id column found.
+    """
+    # Step 1: Identify case_id column
+    case_col = None
+    
+    # Try to find a high-uniqueness non-timestamp column
+    for col in df.columns:
+        if col not in timestamp_cols and is_caseid_candidate(df[col], threshold=0.98):
+            case_col = col
+            break
+    
+    # If not found, try columns with 'id' in the name
+    if case_col is None:
+        id_like = [col for col in df.columns if 'id' in col.lower() and col not in timestamp_cols]
+        if id_like:
+            case_col = max(id_like, key=lambda c: df[c].nunique())
+    
+    # If still not found, use the index
+    if case_col is None:
+        if verbose:
+            print("No suitable case_id column found. Using index as case_id.")
+        df_copy = df.copy()
+        df_copy['case_id'] = df.index
+        case_col = 'case_id'
+    
+    if verbose:
+        print(f"Case-level melt: identified case_id column: {case_col}")
+    
+    # Step 2: Melt operation
+    melted_df = df.melt(
+        id_vars=[case_col],
+        value_vars=timestamp_cols,
+        var_name='activity',
+        value_name='timestamp'
+    )
+    
+    # Step 3: Clean melted data
+    melted_df = melted_df.dropna(subset=['timestamp'])
+    melted_df = melted_df.drop_duplicates()
+    
+    # Step 4: Rename columns to standardized names
+    melted_df = melted_df.rename(columns={
+        case_col: 'case_id'
+    })
+    
+    if verbose:
+        print(f"Case-level melt completed. Shape: {melted_df.shape}")
+        print(f"Melted DataFrame preview:\n{melted_df.head()}")
+    
+    return melted_df, 'case_id', 'activity', 'timestamp'
+
+
+def preprocess_and_generate_candidates(
+    df: pd.DataFrame,
+    verbose: bool = False
+) -> List[dict]:
+    """
+    Preprocess input DataFrame and generate event table candidates based on timestamp column count.
+    
+    Logic:
+    - If <=2 timestamp columns: Generate 1 event-level candidate (requires candidate generation)
+    - If >=3 timestamp columns: Generate 2 candidates
+        1. event-level: select primary timestamp, requires candidate generation
+        2. case-level (melt): melt all timestamps, no candidate generation needed
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        verbose (bool): If True, print debug info.
+    
+    Returns:
+        List[dict]: List of event table candidates. Each candidate is a dict with keys:
+            - 'df': DataFrame (the candidate event table)
+            - 'timestamp_col': str (primary timestamp column name)
+            - 'path_type': str ('event-level', 'event-level-multi', 'case-level-melt')
+            - 'requires_candidate_generation': bool
+            - 'case_col': str (optional, for case-level-melt)
+            - 'activity_col': str (optional, for case-level-melt)
+    
+    Raises:
+        ValueError: If no timestamp columns detected.
+    """
+    # Step 1: Detect timestamp columns
+    timestamp_cols = detect_timestamp_columns_general(df)
+    
+    if verbose:
+        print(f"Detected timestamp columns: {timestamp_cols}")
+    
+    if len(timestamp_cols) == 0:
+        raise ValueError("No timestamp columns detected. Cannot generate event table candidates.")
+    
+    candidates_list = []
+    
+    # Step 2: Branch based on timestamp column count
+    if len(timestamp_cols) <= 2:
+        # Path A: Event-level processing (<=2 timestamp columns)
+        if verbose:
+            print(f"Path A triggered: {len(timestamp_cols)} timestamp columns (<=2)")
+        
+        primary_ts, score = select_primary_timestamp(timestamp_cols, df, verbose=verbose)
+        
+        candidate = {
+            'df': df.copy(),
+            'timestamp_col': primary_ts,
+            'path_type': 'event-level',
+            'requires_candidate_generation': True
+        }
+        candidates_list.append(candidate)
+        
+        if verbose:
+            print(f"Generated 1 event-level candidate")
+    
+    else:  # len(timestamp_cols) >= 3
+        # Path B-1: Event-level processing (>=3 timestamp columns)
+        if verbose:
+            print(f"Path B-1 triggered: {len(timestamp_cols)} timestamp columns (>=3, event-level)")
+        
+        primary_ts, score = select_primary_timestamp(timestamp_cols, df, verbose=verbose)
+        
+        candidate_b1 = {
+            'df': df.copy(),
+            'timestamp_col': primary_ts,
+            'path_type': 'event-level-multi',
+            'requires_candidate_generation': True
+        }
+        candidates_list.append(candidate_b1)
+        
+        if verbose:
+            print(f"Generated event-level-multi candidate with primary timestamp: {primary_ts}")
+        
+        # Path B-2: Case-level (melt) processing (>=3 timestamp columns)
+        if verbose:
+            print(f"Path B-2 triggered: {len(timestamp_cols)} timestamp columns (>=3, case-level melt)")
+        
+        try:
+            melted_df, case_col, activity_col, timestamp_col = melt_case_level_table(
+                df, timestamp_cols, verbose=verbose
+            )
+            
+            candidate_b2 = {
+                'df': melted_df,
+                'case_col': case_col,
+                'activity_col': activity_col,
+                'timestamp_col': timestamp_col,
+                'path_type': 'case-level-melt',
+                'requires_candidate_generation': False  # KEY: No candidate generation needed
+            }
+            candidates_list.append(candidate_b2)
+            
+            if verbose:
+                print(f"Generated case-level-melt candidate")
+        
+        except Exception as e:
+            if verbose:
+                print(f"Case-level melt failed: {e}. Skipping this candidate.")
+    
+    if verbose:
+        print(f"Total candidates generated: {len(candidates_list)}")
+    
+    return candidates_list

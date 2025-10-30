@@ -5,10 +5,12 @@ Now supports separate binary classifiers for case and activity columns only.
 """
 import os
 import joblib
+from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import StandardScaler
+from imblearn.over_sampling import SMOTE
 
 from .feature_extraction import extract_column_features_and_labels_from_dir
 
@@ -34,6 +36,12 @@ def train_case_act_classifiers(
     X_scale = scaler.fit_transform(X)
     y_case = (y == "case").astype(int)
     y_act = (y == "activity").astype(int)
+
+    # --- Use SMOTE to balance each binary task ---
+    smote = SMOTE(random_state=42)
+    X_case_res, y_case_res = smote.fit_resample(X_scale, y_case)
+    X_act_res, y_act_res = smote.fit_resample(X_scale, y_act)
+
     if method == "logistic":
         case_clf = LogisticRegression(max_iter=1000, **params)
         act_clf = LogisticRegression(max_iter=1000, **params)
@@ -49,18 +57,23 @@ def train_case_act_classifiers(
         act_clf = RandomForestClassifier(random_state=42, **params)
         case_model_name = "case_classifier_rf.joblib"
         act_model_name = "act_classifier_rf.joblib"
+    elif method == "svm":
+        case_clf = SVC(probability=True, random_state=42, **params)
+        act_clf = SVC(probability=True, random_state=42, **params)
+        case_model_name = "case_classifier_svm.joblib"
+        act_model_name = "act_classifier_svm.joblib"
     elif method == "gb":
         case_clf = GradientBoostingClassifier(random_state=42, **params)
         act_clf = GradientBoostingClassifier(random_state=42, **params)
         case_model_name = "case_classifier_gb.joblib"
         act_model_name = "act_classifier_gb.joblib"
     else:
-        raise ValueError("method must be 'logistic', 'tree', 'rf', or 'gb'")
-    case_clf.fit(X_scale, y_case)
-    act_clf.fit(X_scale, y_act)
+        raise ValueError("method must be 'logistic', 'tree', 'rf', ‘svm’ or 'gb'")
+    case_clf.fit(X_case_res, y_case_res)
+    act_clf.fit(X_act_res, y_act_res)
     if verbose:
-        print(f"Trained {method} case classifier on {X.shape[0]} samples.")
-        print(f"Trained {method} activity classifier on {X.shape[0]} samples.")
+        print(f"Trained {method} case classifier on {X_case_res.shape[0]} samples (SMOTE).")
+        print(f"Trained {method} activity classifier on {X_act_res.shape[0]} samples (SMOTE).")
     if save_model:
         if model_folder is None:
             model_folder = MODEL_FOLDER
@@ -86,6 +99,9 @@ def load_case_act_classifiers(model_folder: str = None, method: str = "logistic"
     elif method == "rf":
         case_model_name = "case_classifier_rf.joblib"
         act_model_name = "act_classifier_rf.joblib"
+    elif method == "svm":
+        case_model_name = "case_classifier_svm.joblib"
+        act_model_name = "act_classifier_svm.joblib"
     elif method == "gb":
         case_model_name = "case_classifier_gb.joblib"
         act_model_name = "act_classifier_gb.joblib"
