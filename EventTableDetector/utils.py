@@ -7,7 +7,7 @@ import numpy as np
 import difflib
 from dateutil.parser import parse
 import warnings
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 import random
 
 def entropy(arr):
@@ -304,3 +304,61 @@ def detect_timestamp_columns_general(df, sample_size=20, threshold=0.5):
         if valid_count / len(samples) >= threshold:
             timestamp_cols.append(col)
     return timestamp_cols
+
+
+def select_primary_timestamp(timestamp_cols: List[str], df: pd.DataFrame, verbose: bool = False) -> Tuple[str, float]:
+    """
+    Select the primary timestamp column from multiple timestamp columns.
+    
+    Criteria:
+        - Maximum number of unique values (most diverse)
+        - Minimum number of NaN values (least missing)
+    
+    Scoring: score = n_unique - weight * n_missing
+    
+    Args:
+        timestamp_cols (List[str]): List of timestamp column names.
+        df (pd.DataFrame): The DataFrame.
+        verbose (bool): If True, print debug info.
+    
+    Returns:
+        Tuple[str, float]: (best_timestamp_col, score)
+    
+    Raises:
+        ValueError: If no timestamp columns provided.
+    """
+    if not timestamp_cols:
+        raise ValueError("No timestamp columns provided.")
+    
+    if len(timestamp_cols) == 1:
+        if verbose:
+            print(f"Only one timestamp column: {timestamp_cols[0]}")
+        return timestamp_cols[0], 0.0
+    
+    best_col = None
+    best_score = -np.inf
+    scores = {}
+    
+    for col in timestamp_cols:
+        n_unique = df[col].nunique()
+        n_missing = df[col].isna().sum()
+        total_rows = len(df)
+        
+        # Scoring: unique values are positive, missing values are negative (weighted)
+        weight = 0.5  # Adjust weight if needed
+        score = n_unique - weight * n_missing
+        scores[col] = {
+            'n_unique': n_unique,
+            'n_missing': n_missing,
+            'score': score
+        }
+        
+        if score > best_score:
+            best_score = score
+            best_col = col
+    
+    if verbose:
+        print(f"Timestamp column scores: {scores}")
+        print(f"Selected primary timestamp: {best_col} (score: {best_score:.2f})")
+    
+    return best_col, best_score
