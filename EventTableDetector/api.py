@@ -4,7 +4,8 @@ Provides unified external interfaces for event log candidate suggestion, validat
 """
 
 from .core import (
-    convert_to_event_log
+    convert_to_event_log,
+    search_data_platform
 )
 
 from .scoring import (
@@ -12,14 +13,14 @@ from .scoring import (
 )
 from .statistics import (
     get_event_log_statistic,
-    get_event_log_quality,
     validate_event_log,
 )
 
 __all__ = [
+    "search_data_platform"
     "suggest_mandatory_column_candidates",
     "validate_event_log",
     "get_event_log_statistic",
-    "get_event_log_quality",
     "convert_to_event_log"
 ]
+

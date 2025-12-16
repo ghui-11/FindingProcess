@@ -1,8 +1,6 @@
 import os
 import pandas as pd
 import numpy as np
-from scipy.stats import ks_2samp
-from sklearn.utils import resample
 from typing import Tuple, List, Dict, Optional
 
 from sklearn.preprocessing import StandardScaler
@@ -11,10 +9,24 @@ from sklearn.ensemble import IsolationForest
 from sklearn.svm import OneClassSVM
 from sklearn.cluster import DBSCAN
 
-from .core import ensure_long_format, preprocess_and_generate_candidates
+from .core import preprocess_and_generate_candidates
 from .scoring import suggest_mandatory_column_candidates
 
-def get_event_log_statistic(df: pd.DataFrame, case: str, activity: str, timestamp: Optional[str] = None) -> dict:
+
+def get_event_log_statistic(df: pd.DataFrame, case: str, activity: str, timestamp: str = None) -> dict:
+    """
+    Extract all event log statistical and quality metrics in one dictionary.
+
+    Args:
+        df: Input dataframe
+        case: Column name for case ID
+        activity: Column name for activity
+        timestamp: Optional column name for timestamp
+
+    Returns:
+        Dictionary with all statistics and quality metrics
+    """
+    # ====== Statistical Features ======
     num_cases = df[case].nunique()
     num_activities = df[activity].nunique()
     variants = df.groupby(case)[activity].apply(tuple)
@@ -33,7 +45,11 @@ def get_event_log_statistic(df: pd.DataFrame, case: str, activity: str, timestam
             print(f"DFG density calculation error: {e}")
             dfg_density = None
 
-    return {
+    # ====== Quality Metric ======
+    uniq = df[activity].nunique() / len(df) if len(df) > 0 else np.nan
+
+    # ====== Combine All Metrics ======
+    metrics = {
         'num_cases': num_cases,
         'num_activities': num_activities,
         'num_variants': num_variants,
@@ -41,15 +57,24 @@ def get_event_log_statistic(df: pd.DataFrame, case: str, activity: str, timestam
         'variant_ratio': variant_ratio,
         'avg_events_per_case_ratio': avg_events_per_case_ratio,
         'dfg_density': dfg_density,
+        'Uniqueness': uniq,
     }
+    return metrics
 
-def get_event_log_quality(df: pd.DataFrame, case: str, activity: str) -> dict:
-    uniq = df[activity].nunique() / len(df)
-    return {'Uniqueness': uniq}
 
 def read_train_features(train_path=None):
+    """
+    Read training feature matrix from file.
+
+    Args:
+        train_path: Path to training features CSV file
+
+    Returns:
+        Feature matrix array
+    """
     if train_path is None:
-        train_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'Train', 'TrainMatrix', 'train_features.csv'))
+        train_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', 'Train', 'TrainMatrix', 'train_features.csv'))
     df = pd.read_csv(train_path)
     needed_cols = [
         'unique_case_count',
@@ -65,59 +90,18 @@ def read_train_features(train_path=None):
     feature_matrix = df.loc[:, needed_cols].values
     return feature_matrix
 
-def ks_test(new_vector, train_matrix, alpha=0.1):
-    results = []
-    for i in range(train_matrix.shape[1]):
-        train_col = train_matrix[:, i]
-        new_val = new_vector[i]
-        if np.isnan(new_val) or np.isnan(train_col).all():
-            results.append((np.nan, np.nan))
-            continue
-        stat, pval = ks_2samp(train_col[~np.isnan(train_col)], [new_val])
-        results.append((stat, pval))
-    ks_pass = all((pval is np.nan or pval > alpha) for stat, pval in results)
-    return ks_pass, results
-
-def bootstrap_test(new_vector, train_matrix, n_bootstrap=1000, alpha=0.05):
-    results = []
-    np.random.seed(42)
-    for i in range(train_matrix.shape[1]):
-        train_col = train_matrix[:, i]
-        new_val = new_vector[i]
-        if np.isnan(new_val) or np.isnan(train_col).all():
-            results.append((np.nan, np.nan, np.nan, True))
-            continue
-        boot_means = [np.mean(resample(train_col[~np.isnan(train_col)])) for _ in range(n_bootstrap)]
-        ci_lower, ci_upper = np.percentile(boot_means, [2.5, 97.5])
-        pass_test = ci_lower <= new_val <= ci_upper
-        results.append((ci_lower, ci_upper, new_val, pass_test))
-    boot_pass = all(r[-1] for r in results)
-    print(results)
-    return boot_pass, results
-
-def log1p_transform(train_matrix, new_vector):
-    return np.log1p(train_matrix), np.log1p(new_vector)
-
-def bootstrap_test_logmean(new_vector, train_matrix, n_bootstrap=1000, alpha=0.05, verbose=True):
-    train_matrix_log, new_vector_log = log1p_transform(train_matrix, new_vector)
-    results = []
-    np.random.seed(42)
-    for i in range(train_matrix.shape[1]):
-        train_col = train_matrix_log[:, i]
-        new_val = new_vector_log[i]
-        if np.isnan(new_val) or np.isnan(train_col).all():
-            results.append((np.nan, np.nan, np.nan, True))
-            continue
-        boot_means = [np.mean(resample(train_col[~np.isnan(train_col)])) for _ in range(n_bootstrap)]
-        ci_lower, ci_upper = np.percentile(boot_means, [100*alpha/2, 100*(1-alpha/2)])
-        pass_test = ci_lower <= new_val <= ci_upper
-        if verbose:
-            print(f"Feature {i} (log1p): sample={new_val:.3f}, 95%CI=({ci_lower:.3f},{ci_upper:.3f}), pass={pass_test}")
-        results.append((ci_lower, ci_upper, new_val, pass_test))
-    boot_pass = all(r[-1] for r in results)
-    return boot_pass, results
 
 def generate_ca_combinations(c_candidates, a_candidates):
+    """
+    Generate all valid case-activity combinations.
+
+    Args:
+        c_candidates: List of case column candidates
+        a_candidates: List of activity column candidates
+
+    Returns:
+        List of (case, activity) tuples
+    """
     combinations = []
     for c in c_candidates:
         for a in a_candidates:
@@ -125,7 +109,8 @@ def generate_ca_combinations(c_candidates, a_candidates):
                 combinations.append((c, a))
     return combinations
 
-def extract_ca_features(df, case_col, act_col, timestamp_col: Optional[str]=None):
+
+def extract_ca_features(df, case_col, act_col, timestamp_col: Optional[str] = None):
     unique_activity_count = df[act_col].nunique()
     avg_events_per_case = df.groupby(case_col).size().mean()
     variants = df.groupby(case_col)[act_col].apply(tuple)
@@ -151,32 +136,110 @@ def extract_ca_features(df, case_col, act_col, timestamp_col: Optional[str]=None
         dfg_density
     ]
 
-def compute_ca_features(df, case_field, act_field, timestamp_field: Optional[str]=None):
+def compute_ca_features(df, case_field, act_field, timestamp_field: Optional[str] = None):
     traces = df.groupby(case_field)[act_field].apply(list)
+    validation_info = {
+        'passed': True,
+        'messages': []
+    }
+
+    if timestamp_field and timestamp_field in df.columns:
+        df = df.sort_values([case_field, timestamp_field])
+        df = df.drop_duplicates(subset=[case_field, timestamp_field], keep='first')
+
+    all_single_events = all(len(trace) == 1 for trace in traces)
+    if all_single_events:
+        validation_message = 'Validation failed: All traces are single-event traces. Skipping this combination.'
+        validation_info['passed'] = False
+        validation_info['messages'].append(validation_message)
+        return None, None, None, validation_info
+
+    all_identical_values_within_traces = all(len(set(trace)) == 1 for trace in traces)
+    if all_identical_values_within_traces:
+        validation_message = 'Validation failed: All traces have identical activity values ' \
+                             'within each trace. Skipping this combination.'
+        validation_info['passed'] = False
+        validation_info['messages'].append(validation_message)
+        return None, None, None, validation_info
+
     valid_traces = traces[traces.apply(lambda x: len(x) > 1 and len(set(x)) > 1)]
     p = len(valid_traces) / len(traces) if len(traces) > 0 else 0
-    if p < 0.6:
-        print('High proportion of single-activity or single-event traces.')
-        return None, None, None
     valid_cases = valid_traces.index
-    sub_df = df[df[case_field].isin(valid_cases)][[case_field, act_field] + ([timestamp_field] if timestamp_field and timestamp_field in df.columns else [])].rename(columns={case_field: 'case', act_field: 'act', **({timestamp_field: 'time'} if timestamp_field and timestamp_field in df.columns else {})})
-    features = extract_ca_features(sub_df, 'case', 'act', 'time' if timestamp_field and timestamp_field in df.columns else None)
-    return features, p, valid_cases
+
+    if p < 0.3:
+        validation_message = f'Validation failed: Valid trace ratio {p:.2%} is below 30% threshold. ' \
+                             f'{len(valid_traces)}/{len(traces)} traces are valid. Skipping this combination.'
+        validation_info['passed'] = False
+        validation_info['messages'].append(validation_message)
+
+    validation_message = f'Validation passed: {len(valid_traces)}/{len(traces)} traces are valid. Valid ratio: {p:.2%}'
+    validation_info['messages'].append(validation_message)
+
+    sub_df = df[df[case_field].isin(valid_cases)][[case_field, act_field] + (
+        [timestamp_field] if timestamp_field and timestamp_field in df.columns else [])].rename(
+        columns={case_field: 'case', act_field: 'act',
+                 **({timestamp_field: 'time'} if timestamp_field and timestamp_field in df.columns else {})})
+
+    features = extract_ca_features(sub_df, 'case', 'act',
+                                   'time' if timestamp_field and timestamp_field in df.columns else None)
+    return features, p, valid_cases, validation_info
+
+def voting(results, test_types, vote='majority'):
+    """
+    Aggregate test results using voting strategy.
+
+    Returns True if anomaly is detected (outlier detected by majority/all/any tests)
+    - ok=False means outlier detected (anomaly)
+    - ok=True means normal (inlier)
+    """
+    anomaly_list = [not results[t]['ok'] for t in test_types if t in results]
+    if not anomaly_list:
+        return False
+
+    if vote == 'majority':
+        return sum(anomaly_list) >= (len(anomaly_list) // 2 + 1)
+    elif vote == 'all':
+        return all(anomaly_list)
+    elif vote == 'any':
+        return any(anomaly_list)
+    elif vote == 'half':
+        return sum(anomaly_list) >= (len(anomaly_list) // 2)
+    else:
+        return False
+
 
 def detect_lof(train_matrix, new_vector, verbose=False):
+    """
+    Detect anomalies using Local Outlier Factor.
+    """
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_matrix)
     new_scaled = scaler.transform(np.array(new_vector).reshape(1, -1))
-    n_neighbors = min(6, len(train_matrix)-1) if len(train_matrix) > 1 else 1
+    n_neighbors = min(4, len(train_matrix) - 1) if len(train_matrix) > 1 else 1
     lof = LocalOutlierFactor(n_neighbors=n_neighbors, novelty=True)
     lof.fit(train_scaled)
     lof_score = lof.decision_function(new_scaled)[0]
     lof_pred = lof.predict(new_scaled)[0]
+
     if verbose:
-        print(f"LOF score: {lof_score:.4f}, LOF prediction: {'Outlier' if lof_pred == -1 else 'Inlier'}")
-    return {"ok": lof_pred != -1, "detail": {"lof_score": lof_score, "lof_pred": int(lof_pred)}}
+        print(f"LOF score: {lof_score:.4f}, anomaly_prob: {anomaly_probability:.4f}, "
+              f"prediction: {'Outlier' if lof_pred == -1 else 'Inlier'}")
+
+    return {
+        "ok": lof_pred != -1,
+        "detail": {
+            "lof_score": float(lof_score),
+            "lof_pred": int(lof_pred),
+            "is_anomaly": lof_pred == -1,
+            "prediction_binary": 0 if lof_pred == -1 else 1
+        }
+    }
+
 
 def detect_isolation_forest(train_matrix, new_vector, verbose=False):
+    """
+    Detect anomalies using Isolation Forest.
+    """
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_matrix)
     new_scaled = scaler.transform(np.array(new_vector).reshape(1, -1))
@@ -184,11 +247,26 @@ def detect_isolation_forest(train_matrix, new_vector, verbose=False):
     iso.fit(train_scaled)
     iso_score = iso.decision_function(new_scaled)[0]
     iso_pred = iso.predict(new_scaled)[0]
+
     if verbose:
-        print(f"Isolation Forest score: {iso_score:.4f}, IF prediction: {'Outlier' if iso_pred == -1 else 'Inlier'}")
-    return {"ok": iso_pred != -1, "detail": {"iso_score": iso_score, "iso_pred": int(iso_pred)}}
+        print(f"Isolation Forest score: {iso_score:.4f}, anomaly_prob: {anomaly_probability:.4f}, "
+              f"prediction: {'Outlier' if iso_pred == -1 else 'Inlier'}")
+
+    return {
+        "ok": iso_pred != -1,
+        "detail": {
+            "iso_score": float(iso_score),
+            "iso_pred": int(iso_pred),
+            "is_anomaly": iso_pred == -1,
+            "prediction_binary": 0 if iso_pred == -1 else 1
+        }
+    }
+
 
 def detect_ocsvm(train_matrix, new_vector, verbose=False):
+    """
+    Detect anomalies using One-Class SVM.
+    """
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_matrix)
     new_scaled = scaler.transform(np.array(new_vector).reshape(1, -1))
@@ -196,40 +274,73 @@ def detect_ocsvm(train_matrix, new_vector, verbose=False):
     svdd.fit(train_scaled)
     svdd_score = svdd.decision_function(new_scaled)[0]
     svdd_pred = svdd.predict(new_scaled)[0]
+
     if verbose:
-        print(f"OCSVM score: {svdd_score:.4f}, OCSVM prediction: {'Outlier' if svdd_pred == -1 else 'Inlier'}")
-    return {"ok": svdd_pred != -1, "detail": {"ocsvm_score": svdd_score, "ocsvm_pred": int(svdd_pred)}}
+        print(f"OCSVM score: {svdd_score:.4f}, anomaly_prob: {anomaly_probability:.4f}, "
+              f"prediction: {'Outlier' if svdd_pred == -1 else 'Inlier'}")
+
+    return {
+        "ok": svdd_pred != -1,
+        "detail": {
+            "ocsvm_score": float(svdd_score),
+            "ocsvm_pred": int(svdd_pred),
+            "is_anomaly": svdd_pred == -1,
+            "prediction_binary": 0 if svdd_pred == -1 else 1
+        }
+    }
+
 
 def detect_dbscan(train_matrix, new_vector, verbose=False):
+    """
+    Detect anomalies using DBSCAN.
+    """
     scaler = StandardScaler()
     train_scaled = scaler.fit_transform(train_matrix)
     new_scaled = scaler.transform(np.array(new_vector).reshape(1, -1))
-    dbscan = DBSCAN(eps=0.6, min_samples=3)
+    dbscan = DBSCAN(eps=0.6, min_samples=4)
     dbscan.fit(train_scaled)
     core_labels = dbscan.labels_
     nn = NearestNeighbors(n_neighbors=1)
     nn.fit(train_scaled)
     dist, idx = nn.kneighbors(new_scaled)
     dbscan_label = core_labels[idx[0][0]]
-    dbscan_pred = -1 if dbscan_label == -1 else 1
-    if verbose:
-        print(f"DBSCAN prediction: {'Outlier' if dbscan_pred == -1 else 'Inlier'} ")
-    return {"ok": dbscan_pred != -1, "detail": {"dbscan_pred": int(dbscan_pred)}}
+    distance = dist[0][0]
 
-def run_feature_tests(features, train_matrix, test_types=['ks'], test_options=None, verbose=False):
+    dbscan_pred = -1 if distance > 0.6 else 1
+
+    if verbose:
+        print(f"DBSCAN distance: {distance:.4f}, anomaly_prob: {anomaly_probability:.4f}, "
+              f"prediction: {'Outlier' if dbscan_pred == -1 else 'Inlier'}")
+
+    return {
+        "ok": dbscan_pred != -1,
+        "detail": {
+            "dbscan_distance": float(distance),
+            "dbscan_pred": int(dbscan_pred),
+            "is_anomaly": dbscan_pred == -1,
+            "prediction_binary": 0 if dbscan_pred == -1 else 1
+        }
+    }
+
+
+def run_feature_tests(features, train_matrix, test_types=['lof'], test_options=None, verbose=False):
+    """
+    Run multiple feature tests and return results with anomaly scores.
+
+    Args:
+        features: Feature vector to test
+        train_matrix: Training feature matrix
+        test_types: List of test types to run (lof, isoforest, ocsvm, dbscan)
+        test_options: Dictionary with test-specific options
+        verbose: Whether to print detailed results
+
+    Returns:
+        Dictionary with test results
+    """
     result = {}
     test_options = test_options or {}
     for test_type in test_types:
-        if test_type == 'ks':
-            ks_alpha = test_options.get('ks_alpha', 0.1)
-            ks_ok, ks_detail = ks_test(features, train_matrix, alpha=ks_alpha)
-            result['ks'] = {'ok': ks_ok, 'detail': ks_detail}
-        elif test_type == 'bootstrap':
-            boot_alpha = test_options.get('bootstrap_alpha', 0.05)
-            n_bootstrap = test_options.get('n_bootstrap', 1000)
-            boot_ok, boot_detail = bootstrap_test_logmean(features, train_matrix, n_bootstrap=n_bootstrap, alpha=boot_alpha)
-            result['bootstrap'] = {'ok': boot_ok, 'detail': boot_detail}
-        elif test_type == 'lof':
+        if test_type == 'lof':
             result['lof'] = detect_lof(train_matrix, features, verbose=verbose)
         elif test_type == 'isoforest':
             result['isoforest'] = detect_isolation_forest(train_matrix, features, verbose=verbose)
@@ -239,39 +350,58 @@ def run_feature_tests(features, train_matrix, test_types=['ks'], test_options=No
             result['dbscan'] = detect_dbscan(train_matrix, features, verbose=verbose)
     return result
 
-def voting(results, test_types, vote='majority'):
-    ok_list = [results[t]['ok'] for t in test_types if t in results]
-    if not ok_list:
-        return False
-    if vote == 'majority':
-        return sum(ok_list) >= (len(ok_list) // 2 + 1)
-    elif vote == 'all':
-        return all(ok_list)
-    elif vote == 'any':
-        return any(ok_list)
-    elif vote == 'half':
-        return sum(ok_list) >= (len(ok_list) // 2)
-    else:
-        return False
 
 def event_combinations(
-    df, a_candidates, c_candidates, train_features_path,
-    test_types=['ks'],
-    test_options=None,
-    verbose=True,
-    timestamp_candidates: Optional[List[str]] = None,
-    vote='majority'
+        df, a_candidates, c_candidates, train_features_path,
+        test_types=['lof'],
+        test_options=None,
+        verbose=True,
+        timestamp_candidates: Optional[List[str]] = None,
+        vote='majority'
 ):
+    """
+    Run event combinations with enhanced logging.
+
+    Args:
+        df: Input dataframe
+        a_candidates: List of activity column candidates
+        c_candidates: List of case column candidates
+        train_features_path: Path to training features
+        test_types: List of test types to run
+        test_options: Dictionary with test-specific options
+        verbose: Whether to print detailed results
+        timestamp_candidates: List of timestamp column candidates
+        vote: Voting strategy
+
+    Returns:
+        List of result dictionaries with validation info
+    """
     train_matrix = read_train_features(train_features_path)
     combinations = generate_ca_combinations(c_candidates, a_candidates)
     results = []
     if timestamp_candidates is None:
         timestamp_candidates = []
+
     for c, a in combinations:
         ts = timestamp_candidates[0] if len(timestamp_candidates) > 0 else None
-        features, p, valid_cases = compute_ca_features(df, c, a, ts)
+        features, p, valid_cases, validation_info = compute_ca_features(df, c, a, ts)
+
         if features is None:
+            res = {
+                "case": c,
+                "act": a,
+                "timestamp": ts,
+                "valid_trace_percentage": p,
+                "features": None,
+                "test_result": {},
+                "pass": False,
+                "validation_info": validation_info
+            }
+            results.append(res)
+            if verbose:
+                print(f"[{c}, {a}] Validation failed: {validation_info['messages']}")
             continue
+
         test_result = run_feature_tests(features, train_matrix, test_types, test_options, verbose=verbose)
         pass_test = voting(test_result, test_types, vote)
         res = {
@@ -281,28 +411,35 @@ def event_combinations(
             "valid_trace_percentage": p,
             "features": features,
             "test_result": test_result,
-            "pass": pass_test
+            "pass": pass_test,
+            "validation_info": validation_info
         }
         results.append(res)
+
     return results
 
+
 def validate_event_log(
-    df: pd.DataFrame,
-    candidates: Optional[List[Tuple[str, str, str]]] = None,
-    test_types=['ks'],
-    test_options=None,
-    vote='majority',
-    train_features_path=None,
-    params=None,
-    verbose: bool = False,
-    auto_branch: bool = True,
-    return_all_novelty: bool = False
-) -> Tuple[bool, Dict[str, str]] or List[Dict]:
+        df: pd.DataFrame,
+        candidates: Optional[List[Tuple[str, str, str]]] = None,
+        test_types=['lof', 'isoforest', 'ocsvm', 'dbscan'],
+        test_options=None,
+        vote='half',
+        train_features_path=None,
+        params=None,
+        verbose: bool = False,
+        auto_branch: bool = True,
+) -> Tuple[bool, List[Dict]]:
     """
-    If return_all_novelty=True, always returns a list of candidate dicts (may be empty).
+    Validate event log and detect anomalies.
+    Returns (success: bool, all valid combinations as [{'timestamp':..., 'case':..., 'activity':...}, ...])
     """
     if train_features_path is None:
-        train_features_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'Train', 'TrainMatrix', 'train_features.csv'))
+        train_features_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', 'Train', 'TrainMatrix', 'train_features.csv'))
+
+    valid_combinations = []
+    has_valid = False
 
     if auto_branch and candidates is None:
         try:
@@ -310,83 +447,55 @@ def validate_event_log(
         except ValueError as e:
             if verbose:
                 print(f"Branching preprocessing failed: {e}")
-            if return_all_novelty:
-                return []
-            return False, {}
+            return False, []
+
         if not event_table_candidates:
             if verbose:
                 print("No event table candidates generated.")
-            if return_all_novelty:
-                return []
-            return False, {}
+            return False, []
 
-        all_candidate_results = []
-        for idx, candidate in enumerate(event_table_candidates):
+        for candidate_idx, candidate in enumerate(event_table_candidates, 1):
             candidate_df = candidate['df']
-            path_type = candidate['path_type']
             requires_gen = candidate['requires_candidate_generation']
+
             if requires_gen:
                 try:
-                    long_df = ensure_long_format(candidate_df, verbose=False)
-                except ValueError:
-                    continue
-                combinations = suggest_mandatory_column_candidates(
-                    long_df, method="rf",  params=params, verbose=verbose
-                )
-                if not combinations:
-                    continue
-                for t, c, a in combinations:
-                    res_list = event_combinations(
-                        long_df, [a], [c], train_features_path,
-                        test_types=test_types, test_options=test_options, verbose=verbose,
-                        timestamp_candidates=[t] if t else [],
-                        vote=vote
+                    combinations = suggest_mandatory_column_candidates(
+                        candidate_df, method="rf", params=params, verbose=verbose
                     )
-                    if res_list:
-                        res = res_list[0]
-                        novelty_results = {k: res['test_result'][k]['ok'] for k in test_types if k in res['test_result']}
-                        candidate_result = {
-                            'timestamp': t,
-                            'case': c,
-                            'activity': a,
-                            'novelty_results': novelty_results,
-                            'source_path': path_type,
-                        }
-                        all_candidate_results.append(candidate_result)
-                        if not return_all_novelty:
-                            if voting(res['test_result'], test_types, vote):
-                                return True, candidate_result
+                except Exception as e:
+                    if verbose:
+                        print(f"  Suggest failed: {e}")
+                    combinations = []
+                for (t, c, a) in combinations:
+                    if t in candidate_df.columns and c in candidate_df.columns and a in candidate_df.columns:
+                        res_list = event_combinations(
+                            candidate_df, [a], [c], train_features_path,
+                            test_types=test_types, test_options=test_options, verbose=False,
+                            timestamp_candidates=[t] if t else [],
+                            vote=vote
+                        )
+                        if res_list and res_list[0].get('validation_info', {}).get('passed', False):
+                            valid_combinations.append({'timestamp': t, 'case': c, 'activity': a})
+                            has_valid = True
             else:
                 case_col = candidate.get('case_col')
                 activity_col = candidate.get('activity_col')
                 timestamp_col = candidate.get('timestamp_col')
                 if not all([case_col, activity_col, timestamp_col]):
                     continue
+                if case_col not in candidate_df.columns or activity_col not in candidate_df.columns or timestamp_col not in candidate_df.columns:
+                    continue
                 res_list = event_combinations(
                     candidate_df, [activity_col], [case_col], train_features_path,
-                    test_types=test_types, test_options=test_options, verbose=verbose,
+                    test_types=test_types, test_options=test_options, verbose=False,
                     timestamp_candidates=[timestamp_col] if timestamp_col else [],
                     vote=vote
                 )
-                if res_list:
-                    res = res_list[0]
-                    novelty_results = {k: res['test_result'][k]['ok'] for k in test_types if k in res['test_result']}
-                    candidate_result = {
-                        'timestamp': timestamp_col,
-                        'case': case_col,
-                        'activity': activity_col,
-                        'novelty_results': novelty_results,
-                        'source_path': path_type,
-                    }
-                    all_candidate_results.append(candidate_result)
-                    if not return_all_novelty:
-                        if voting(res['test_result'], test_types, vote):
-                            return True, candidate_result
-        if return_all_novelty:
-            return all_candidate_results
-        else:
-            return False, {}
-    # legacy mode (if you need, fill here)
-    if return_all_novelty:
-        return []
-    return False, {}
+                if res_list and res_list[0].get('validation_info', {}).get('passed', False):
+                    valid_combinations.append({'timestamp': timestamp_col, 'case': case_col, 'activity': activity_col})
+                    has_valid = True
+
+        return has_valid, valid_combinations
+
+    return False, []

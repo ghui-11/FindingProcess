@@ -1,375 +1,266 @@
 import pandas as pd
 import re
 from typing import List, Optional, Tuple
+from .utils import detect_true_event_timestamp_columns
 
-from .utils import (
-    detect_timestamp_columns_general,
-    is_datetime_like_general,
-    select_primary_timestamp,
-)
-
-def is_caseid_candidate(series: pd.Series, threshold: float = 0.98) -> bool:
-    """
-    Determine if a pandas Series is a candidate for a case id column.
-
-    Criteria:
-        - No missing values.
-        - High uniqueness ratio.
-        - Not purely numeric (including no sign or decimal point).
-        - All values' character length < 100.
-
-    Args:
-        series (pd.Series): The column to check.
-        threshold (float): Minimum unique ratio to qualify as case id.
-
-    Returns:
-        bool: True if candidate, False otherwise.
-    """
-    if series.isna().sum() > 0:
-        return False
-    n_unique_ratio = series.nunique(dropna=True) / len(series)
-    if n_unique_ratio < threshold:
-        return False
-    vals = series.astype(str)
-    # Exclude if all values are purely numeric (with optional sign/decimal)
-    is_numeric_like = vals.apply(lambda x: bool(re.fullmatch(r"[\+\-]?\d+(\.\d+)?", x)))
-    if is_numeric_like.all():
-        return False
-    # Exclude if any value is too long
-    if (vals.apply(len) >= 100).any():
-        return False
-    return True
+def select_primary_timestamp(timestamp_cols: List[str], df: pd.DataFrame, verbose: bool = False) -> Tuple[str, float]:
+    """Pick best timestamp column by uniqueness/missing."""
+    if not timestamp_cols:
+        raise ValueError("No timestamp columns provided.")
+    if len(timestamp_cols) == 1:
+        if verbose: print(f"[primary_ts] Only one ts col: {timestamp_cols[0]}")
+        return timestamp_cols[0], 0.0
+    best_col, best_score = None, -float("inf")
+    for col in timestamp_cols:
+        n_unique = df[col].nunique()
+        n_missing = df[col].isna().sum()
+        score = n_unique - 0.5 * n_missing
+        if verbose: print(f"[primary_ts] {col}: unique={n_unique}, missing={n_missing}, score={score:.2f}")
+        if score > best_score:
+            best_col = col
+            best_score = score
+    if verbose: print(f"[primary_ts] Picked: {best_col}")
+    return best_col, best_score
 
 def detect_table_type(df: pd.DataFrame, verbose: bool = False) -> str:
-    """
-    Detect whether a DataFrame is in 'long' or 'wide' format.
-
-    Args:
-        df (pd.DataFrame): The DataFrame to analyze.
-        verbose (bool): If True, print debug info.
-
-    Returns:
-        str: 'long' or 'wide' or 'No' (if no timestamp columns).
-    """
-    timestamp_cols = detect_timestamp_columns_general(df)
+    """Judge table format: long/wide/none."""
+    timestamp_cols = detect_true_event_timestamp_columns(df, verbose=verbose)
     N = len(timestamp_cols)
-    if verbose:
-        print(f"Detected timestamp columns: {timestamp_cols}")
+    if verbose: print(f"[type] Timestamp cols: {timestamp_cols}")
     if N == 0:
-        if verbose:
-            print("No timestamp columns detected. Not event log.")
+        if verbose: print("[type] No timestamp columns found.")
         return 'No'
     if N <= 2:
-        if verbose:
-            print("Table type judged as long (<=2 timestamp columns).")
+        if verbose: print("[type] Judged as long table.")
         return 'long'
     for col in df.columns:
-        if col not in timestamp_cols and is_caseid_candidate(df[col], threshold=0.98):
+        if col not in timestamp_cols and is_caseid_candidate(df[col]):
             if df[col].is_unique:
-                if verbose:
-                    print(f"Table type judged as wide (column '{col}' is a valid case id).")
+                if verbose: print(f"[type] Wide (unique case id: {col})")
                 return 'wide'
     if N >= 3:
-        non_nan_counts = [df[c].notna().sum() for c in timestamp_cols]
-        total_rows = len(df)
-        if all(cnt > 0.7 * total_rows for cnt in non_nan_counts):
-            std_ratio = pd.Series(non_nan_counts).std() / (total_rows + 1e-9)
-            if std_ratio < 0.3:
-                if verbose:
-                    print("Table type judged as wide (timestamp columns are evenly filled).")
-                return 'wide'
-    if verbose:
-        print("Table type judged as long.")
+        non_nan = [df[c].notna().sum() for c in timestamp_cols]
+        total = len(df)
+        std_ratio = pd.Series(non_nan).std() / (total + 1e-9)
+        if all(cnt > 0.7 * total for cnt in non_nan) and std_ratio < 0.3:
+            if verbose: print("[type] Wide (timestamps evenly filled).")
+            return 'wide'
+    if verbose: print("[type] Long table.")
     return 'long'
 
-def wide_to_long(df: pd.DataFrame, timestamp_cols: List[str], case_col: str) -> pd.DataFrame:
-    """
-    Convert a DataFrame from wide format to long format.
-
-    Args:
-        df (pd.DataFrame): The wide-format DataFrame.
-        timestamp_cols (List[str]): Timestamp columns.
-        case_col (str): Case id column.
-
-    Returns:
-        pd.DataFrame: Long-format DataFrame with columns 'case', 'activity', 'timestamp'.
-    """
-    long_df = (
-        df.melt(id_vars=[case_col], value_vars=timestamp_cols,
-                var_name='activity', value_name='timestamp')
-        .dropna(subset=['timestamp'])
-        .rename(columns={case_col: 'case'})
-    )
-    long_df = long_df.drop_duplicates()
+def wide_to_long(df: pd.DataFrame, timestamp_cols: List[str], case_col: str, verbose: bool = False) -> pd.DataFrame:
+    """Wide->long; dedup by case/activity/timestamp."""
+    long_df = df.melt(id_vars=[case_col], value_vars=timestamp_cols, var_name='activity', value_name='timestamp')
+    long_df = long_df.dropna(subset=['timestamp'])
+    long_df = long_df.rename(columns={case_col: 'case'})
+    long_df = long_df.drop_duplicates(['case', 'activity', 'timestamp'])
+    if verbose: print(f"[wide2long] Rows: {long_df.shape[0]}")
     return long_df
 
 def ensure_long_format(df: pd.DataFrame, case_candidates=None, verbose: bool = False) -> pd.DataFrame:
-    """
-    Ensure the input DataFrame is in long format.
-
-    Args:
-        df (pd.DataFrame): The DataFrame to check/convert.
-        case_candidates (list or None): Optional candidate case columns.
-        verbose (bool): If True, print debug info.
-
-    Returns:
-        pd.DataFrame: Long-format DataFrame.
-    Raises:
-        ValueError: If no suitable case id column found in wide mode.
-    """
+    """Ensure long format; wide->long if needed."""
     table_type = detect_table_type(df, verbose=verbose)
-    if table_type == 'No':
-        raise ValueError("No timestamp columns detected. Event log validation FAILED.")
+    if table_type == 'No': raise ValueError("No ts columns found.")
     if table_type == 'wide':
-        timestamp_cols = detect_timestamp_columns_general(df)
-        if not case_candidates:
-            candidates = [
-                col for col in df.columns
-                if col not in timestamp_cols and is_caseid_candidate(df[col])
-            ]
-            if candidates:
-                case_col = max(candidates, key=lambda c: df[c].nunique())
-            else:
-                id_like = [col for col in df.columns if 'id' in col.lower()]
-                if id_like:
-                    case_col = max(id_like, key=lambda c: df[c].nunique() / len(df))
-                else:
-                    raise ValueError("No suitable case id column found for wide table, cannot convert to long format.")
+        timestamp_cols = detect_true_event_timestamp_columns(df, verbose=verbose)
+        candidates = ([col for col in df.columns if col not in timestamp_cols and is_caseid_candidate(df[col])]
+                      if not case_candidates else case_candidates)
+        if candidates:
+            case_col = max(candidates, key=lambda c: df[c].nunique())
         else:
-            case_col = case_candidates[0]
-
-        if verbose:
-            print(f"Converting wide to long using case column: {case_col} and timestamp columns: {timestamp_cols}")
-        df_long = wide_to_long(df, timestamp_cols, case_col)
-        return df_long
+            id_like = [col for col in df.columns if 'id' in col.lower()]
+            if id_like:
+                case_col = max(id_like, key=lambda c: df[c].nunique() / len(df))
+            else:
+                raise ValueError("No case id for wide table.")
+        long_df = wide_to_long(df, timestamp_cols, case_col, verbose=verbose)
+        return long_df
     return df
-
-def filter_datetime_columns(df: pd.DataFrame, columns: list, sample_size: int = 20) -> list:
-    """
-    Filter out columns detected as datetime-like from a provided list.
-
-    Args:
-        df (pd.DataFrame): The DataFrame.
-        columns (list): Candidate columns.
-        sample_size (int): Number of samples to check.
-
-    Returns:
-        list: Columns that are NOT detected as datetime-like.
-    """
-    filtered_cols = []
-    for col in columns:
-        series_sample = df[col].dropna().astype(str).head(sample_size)
-        if len(series_sample) == 0:
-            filtered_cols.append(col)
-            continue
-        is_datetime_col = all(is_datetime_like_general(v) for v in series_sample)
-        if not is_datetime_col:
-            filtered_cols.append(col)
-    return filtered_cols
 
 def convert_to_event_log(df: pd.DataFrame, case: str, activity: str, timestamp: str, verbose: bool = False) -> pd.DataFrame:
     """
-    Convert a DataFrame to a standardized event log with columns 'case', 'activity', 'timestamp'.
-
-    Args:
-        df (pd.DataFrame): The input DataFrame.
-        case (str): The case column name.
-        activity (str): The activity column name.
-        timestamp (str): The timestamp column name.
-        verbose (bool): If True, print debug info.
-
-    Returns:
-        pd.DataFrame: Standardized event log DataFrame.
+    Convert to standardized event log.
     """
-    if verbose:
-        print(f"Converting to event log using columns: case={case}, activity={activity}, timestamp={timestamp}")
-    long_df = ensure_long_format(df, [case], verbose=verbose)
-    event_log = long_df[[case, activity, timestamp]].rename(
-        columns={case: 'case', activity: 'activity', timestamp: 'timestamp'}
-    )
-    if verbose:
-        print("Event log preview:\n", event_log.head())
-    return event_log
 
-
-def melt_case_level_table(
-    df: pd.DataFrame,
-    timestamp_cols: List[str],
-    verbose: bool = False
-) -> Tuple[pd.DataFrame, str, str, str]:
-    """
-    Convert a wide-format DataFrame (case-level) to long format by melting all timestamp columns.
-    
-    This function:
-    1. Identifies a case_id column
-    2. Melts all timestamp columns into (case_id, activity, timestamp) format
-    3. Returns the melted DataFrame and column names
-    
-    Args:
-        df (pd.DataFrame): The wide-format DataFrame.
-        timestamp_cols (List[str]): All timestamp column names.
-        verbose (bool): If True, print debug info.
-    
-    Returns:
-        Tuple[pd.DataFrame, str, str, str]: (melted_df, case_col, activity_col, timestamp_col)
-    
-    Raises:
-        ValueError: If no suitable case_id column found.
-    """
-    # Step 1: Identify case_id column
-    case_col = None
-    
-    # Try to find a high-uniqueness non-timestamp column
-    for col in df.columns:
-        if col not in timestamp_cols and is_caseid_candidate(df[col], threshold=0.98):
-            case_col = col
-            break
-    
-    # If not found, try columns with 'id' in the name
-    if case_col is None:
-        id_like = [col for col in df.columns if 'id' in col.lower() and col not in timestamp_cols]
-        if id_like:
-            case_col = max(id_like, key=lambda c: df[c].nunique())
-    
-    # If still not found, use the index
-    if case_col is None:
+    wanted_cols = [case, activity, timestamp]
+    # All columns must exist and must be unique
+    cols_exist = all(col in df.columns for col in wanted_cols)
+    if cols_exist:
+        long_df = df.copy()
+        log = long_df[[case, activity, timestamp]].rename(
+            columns={case: 'case:concept:name', activity: 'concept:name', timestamp: 'time:timestamp'}
+        )
         if verbose:
-            print("No suitable case_id column found. Using index as case_id.")
-        df_copy = df.copy()
-        df_copy['case_id'] = df.index
-        case_col = 'case_id'
-    
-    if verbose:
-        print(f"Case-level melt: identified case_id column: {case_col}")
-    
-    # Step 2: Melt operation
-    melted_df = df.melt(
-        id_vars=[case_col],
-        value_vars=timestamp_cols,
-        var_name='activity',
-        value_name='timestamp'
+            print(f"[eventlog] Used direct columns: {wanted_cols}, rows: {len(log)}")
+        return log
+    else:
+        error_msg = f"[eventlog] Assignment is wrong: not all of case/activity/timestamp columns exist in table."
+        if verbose:
+            print(error_msg)
+        raise ValueError(error_msg)
+
+def check_case_level_candidate_by_intervals(df, candidate_ts_cols, interval_threshold_seconds=120,
+                                            identical_ratio_threshold=0.85, verbose=False) -> bool:
+    """Check if timestamp columns can be case-melted (vectorized for performance, no overlap check)."""
+    sample_size = min(500, len(df))
+    df_sample = df.iloc[:sample_size].copy()
+
+    interval_stats = []
+    identical_count = 0
+
+    for col in candidate_ts_cols:
+        col_dt = pd.to_datetime(df_sample[col], errors='coerce')
+        df_sample[f'_{col}_dt'] = col_dt
+
+    for idx, row in df_sample.iterrows():
+        times = [row[f'_{col}_dt'] for col in candidate_ts_cols if pd.notnull(row[f'_{col}_dt'])]
+        if len(times) >= 2:
+            times_sorted = sorted(times)
+            diffs = [(times_sorted[i] - times_sorted[i - 1]).total_seconds() for i in range(1, len(times_sorted))]
+            interval_stats.extend(diffs)
+            if len(set(times_sorted)) == 1:
+                identical_count += 1
+
+    if not interval_stats:
+        if verbose: print("[caselevel] No valid intervals found.")
+        return False
+
+    pct_short = sum(1 for d in interval_stats if d < interval_threshold_seconds) / len(interval_stats)
+    pct_identical = identical_count / len(df_sample) if len(df_sample) > 0 else 0
+    if verbose: print(
+        f"[caselevel] Short ratio (<{interval_threshold_seconds}s): {pct_short:.2f}, Identical: {pct_identical:.2f}")
+    return pct_short <= 0.8 and pct_identical <= identical_ratio_threshold
+
+
+def melt_case_level_table(df: pd.DataFrame, timestamp_cols: list, verbose: bool = False):
+    """
+    For 3+ timestamp columns (same format), melt into event log:
+    - case: input table index
+    - activity: column name of timestamp
+    - timestamp: value
+    Remove duplicate events (case,activity,timestamp).
+    """
+    # Step 1: Add case column as index
+    df_copy = df.copy()
+    df_copy['case'] = df.index
+
+    # Step 2: Melt wide to long format
+    melted_df = df_copy.melt(
+        id_vars=['case'], value_vars=timestamp_cols,
+        var_name='activity', value_name='timestamp'
     )
-    
-    # Step 3: Clean melted data
+
+    # Step 3: Drop invalid events
     melted_df = melted_df.dropna(subset=['timestamp'])
-    melted_df = melted_df.drop_duplicates()
-    
-    # Step 4: Rename columns to standardized names
-    melted_df = melted_df.rename(columns={
-        case_col: 'case_id'
-    })
-    
+
+    # Step 4: Remove duplicates (case, activity, timestamp)
+    melted_df = melted_df.drop_duplicates(['case', 'activity', 'timestamp'])
+
     if verbose:
-        print(f"Case-level melt completed. Shape: {melted_df.shape}")
-        print(f"Melted DataFrame preview:\n{melted_df.head()}")
-    
-    return melted_df, 'case_id', 'activity', 'timestamp'
+        print(f"[melt] Melted rows: {len(melted_df)}, Unique cases: {melted_df['case'].nunique()}, Timestamp cols: {timestamp_cols}")
+
+    # Standardize column order for downstream
+    return melted_df[['case','activity','timestamp']], 'case', 'activity', 'timestamp'
 
 
-def preprocess_and_generate_candidates(
-    df: pd.DataFrame,
-    verbose: bool = False
-) -> List[dict]:
-    """
-    Preprocess input DataFrame and generate event table candidates based on timestamp column count.
-    
-    Logic:
-    - If <=2 timestamp columns: Generate 1 event-level candidate (requires candidate generation)
-    - If >=3 timestamp columns: Generate 2 candidates
-        1. event-level: select primary timestamp, requires candidate generation
-        2. case-level (melt): melt all timestamps, no candidate generation needed
-    
-    Args:
-        df (pd.DataFrame): Input DataFrame.
-        verbose (bool): If True, print debug info.
-    
-    Returns:
-        List[dict]: List of event table candidates. Each candidate is a dict with keys:
-            - 'df': DataFrame (the candidate event table)
-            - 'timestamp_col': str (primary timestamp column name)
-            - 'path_type': str ('event-level', 'event-level-multi', 'case-level-melt')
-            - 'requires_candidate_generation': bool
-            - 'case_col': str (optional, for case-level-melt)
-            - 'activity_col': str (optional, for case-level-melt)
-    
-    Raises:
-        ValueError: If no timestamp columns detected.
-    """
-    # Step 1: Detect timestamp columns
-    timestamp_cols = detect_timestamp_columns_general(df)
-    
-    if verbose:
-        print(f"Detected timestamp columns: {timestamp_cols}")
-    
-    if len(timestamp_cols) == 0:
-        raise ValueError("No timestamp columns detected. Cannot generate event table candidates.")
-    
+def preprocess_and_generate_candidates(df: pd.DataFrame, verbose: bool = False) -> List[dict]:
+    """Generate event table candidates. Overlap ratio check removed."""
+    timestamp_cols = detect_true_event_timestamp_columns(df, verbose=verbose)
+    if not timestamp_cols: raise ValueError("No ts columns detected.")
     candidates_list = []
-    
-    # Step 2: Branch based on timestamp column count
-    if len(timestamp_cols) <= 2:
-        # Path A: Event-level processing (<=2 timestamp columns)
-        if verbose:
-            print(f"Path A triggered: {len(timestamp_cols)} timestamp columns (<=2)")
-        
-        primary_ts, score = select_primary_timestamp(timestamp_cols, df, verbose=verbose)
-        
-        candidate = {
-            'df': df.copy(),
+    num_ts = len(timestamp_cols)
+    if verbose: print(f"[preprocess] Timestamp cols: {timestamp_cols}")
+    if num_ts <= 2:
+        long_df = ensure_long_format(df, verbose=verbose)
+        primary_ts, _ = select_primary_timestamp(timestamp_cols, long_df, verbose=verbose)
+        candidates_list.append({
+            'df': long_df,
             'timestamp_col': primary_ts,
             'path_type': 'event-level',
             'requires_candidate_generation': True
-        }
-        candidates_list.append(candidate)
-        
-        if verbose:
-            print(f"Generated 1 event-level candidate")
-    
-    else:  # len(timestamp_cols) >= 3
-        # Path B-1: Event-level processing (>=3 timestamp columns)
-        if verbose:
-            print(f"Path B-1 triggered: {len(timestamp_cols)} timestamp columns (>=3, event-level)")
-        
-        primary_ts, score = select_primary_timestamp(timestamp_cols, df, verbose=verbose)
-        
-        candidate_b1 = {
-            'df': df.copy(),
+        })
+        if verbose: print("[preprocess] Added event-level candidate")
+    else:
+        primary_ts, _ = select_primary_timestamp(timestamp_cols, df, verbose=verbose)
+        candidates_list.append({
+            'df': df,
             'timestamp_col': primary_ts,
             'path_type': 'event-level-multi',
             'requires_candidate_generation': True
-        }
-        candidates_list.append(candidate_b1)
-        
-        if verbose:
-            print(f"Generated event-level-multi candidate with primary timestamp: {primary_ts}")
-        
-        # Path B-2: Case-level (melt) processing (>=3 timestamp columns)
-        if verbose:
-            print(f"Path B-2 triggered: {len(timestamp_cols)} timestamp columns (>=3, case-level melt)")
-        
-        try:
-            melted_df, case_col, activity_col, timestamp_col = melt_case_level_table(
-                df, timestamp_cols, verbose=verbose
-            )
-            
-            candidate_b2 = {
+        })
+        interval_ok = check_case_level_candidate_by_intervals(df, timestamp_cols, verbose=verbose)
+        if interval_ok:
+            melted_df, case_col, activity_col, timestamp_col = melt_case_level_table(df, timestamp_cols, verbose=verbose)
+            candidates_list.append({
                 'df': melted_df,
                 'case_col': case_col,
                 'activity_col': activity_col,
                 'timestamp_col': timestamp_col,
                 'path_type': 'case-level-melt',
-                'requires_candidate_generation': False  # KEY: No candidate generation needed
-            }
-            candidates_list.append(candidate_b2)
-            
+                'requires_candidate_generation': False
+            })
+            if verbose: print("[preprocess] Added case-level-melt candidate")
+        else:
             if verbose:
-                print(f"Generated case-level-melt candidate")
-        
-        except Exception as e:
-            if verbose:
-                print(f"Case-level melt failed: {e}. Skipping this candidate.")
-    
-    if verbose:
-        print(f"Total candidates generated: {len(candidates_list)}")
-    
+                msg = "[preprocess] Case-level-melt skipped: "
+                if not interval_ok:
+                    print(msg + "interval diversity insufficient.")
+    if verbose: print(f"[preprocess] Finished. Total candidates: {len(candidates_list)}")
     return candidates_list
+
+def sort_event_log_by_timestamp(df, case_col='case', activity_col='activity', timestamp_col='timestamp', verbose=False) -> pd.DataFrame:
+    """Sort and clean event log by timestamp."""
+    df_copy = df.copy()
+    df_copy[timestamp_col] = pd.to_datetime(df_copy[timestamp_col], errors='coerce')
+    df_copy = df_copy.dropna(subset=[timestamp_col])
+    df_sorted = df_copy.sort_values([case_col, timestamp_col])
+    if verbose: print(f"[sortlog] Sorted: {len(df_sorted)} rows. Date range: {df_sorted[timestamp_col].min()} ~ {df_sorted[timestamp_col].max()}")
+    return df_sorted
+
+def search_data_platform(search_term:str, api, topn=10, download_dir="datasets"):
+    """
+    Search data platform using Kaggle API and download the topn datasets that each contain exactly one CSV file.
+
+    Args:
+        search_term (str): Search keyword specified by user.
+        api (KaggleApi): Authenticated KaggleApi instance, provided by user.
+        topn (int): Number of datasets to fetch (default 10).
+        download_dir (str): Directory to store downloaded files.
+
+    Returns:
+        datasets (list): List of dicts with 'ref', 'csv_path', and 'title' for each found dataset.
+    """
+    import os
+
+    os.makedirs(download_dir, exist_ok=True)
+    results = api.dataset_list(search=search_term, file_type="csv", sort_by="hottest")
+    datasets = []
+    for ds in results:
+        ref = ds.ref
+        files = api.dataset_list_files(ref).files
+        csv_files = [f for f in files if f.name.lower().endswith('.csv')]
+        if len(csv_files) != 1:
+            continue
+        csv_file = csv_files[0]
+        ds_dir = os.path.join(download_dir, ref.replace('/', '__'))
+        os.makedirs(ds_dir, exist_ok=True)
+        try:
+            api.dataset_download_file(ref, csv_file.name, path=ds_dir, force=True, quiet=True)
+        except Exception as e:
+            print(f"Failed to download {csv_file.name} from {ref}: {e}")
+            continue
+        csv_path = os.path.join(ds_dir, csv_file.name)
+        # Unzip if needed
+        if os.path.exists(csv_path + '.zip'):
+            import zipfile
+            with zipfile.ZipFile(csv_path + '.zip', 'r') as zip_ref:
+                zip_ref.extractall(ds_dir)
+            os.remove(csv_path + '.zip')
+        datasets.append({
+            "ref": ref,
+            "csv_path": os.path.join(ds_dir, csv_file.name),
+            "title": ds.title,
+        })
+        if len(datasets) >= topn:
+            break
+    return datasets
