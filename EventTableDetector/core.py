@@ -1,7 +1,9 @@
 import pandas as pd
-import re
 from typing import List, Optional, Tuple
 from .utils import detect_true_event_timestamp_columns
+import os
+import requests
+from kaggle.api.kaggle_api_extended import KaggleApi
 
 def select_primary_timestamp(timestamp_cols: List[str], df: pd.DataFrame, verbose: bool = False) -> Tuple[str, float]:
     """Pick best timestamp column by uniqueness/missing."""
@@ -217,50 +219,132 @@ def sort_event_log_by_timestamp(df, case_col='case', activity_col='activity', ti
     if verbose: print(f"[sortlog] Sorted: {len(df_sorted)} rows. Date range: {df_sorted[timestamp_col].min()} ~ {df_sorted[timestamp_col].max()}")
     return df_sorted
 
-def search_data_platform(search_term:str, api, topn=10, download_dir="datasets"):
+
+def search_data_platform(search_term, platform="kaggle", download_dir="datasets", topn=10):
     """
-    Search data platform using Kaggle API and download the topn datasets that each contain exactly one CSV file.
+    Search and download CSV datasets from Kaggle or Zenodo.
 
     Args:
-        search_term (str): Search keyword specified by user.
-        api (KaggleApi): Authenticated KaggleApi instance, provided by user.
-        topn (int): Number of datasets to fetch (default 10).
+        search_term (str): Search keyword.
+        platform (str): 'kaggle' or 'zenodo' (default: 'kaggle').
         download_dir (str): Directory to store downloaded files.
+        topn (int): Maximum number of datasets to fetch.
 
     Returns:
-        datasets (list): List of dicts with 'ref', 'csv_path', and 'title' for each found dataset.
+        datasets (list): List of datasets.
     """
-    import os
-
     os.makedirs(download_dir, exist_ok=True)
+
+    if platform.lower() == "kaggle":
+        return _search_kaggle(search_term, download_dir, topn)
+    elif platform.lower() == "zenodo":
+        return _search_zenodo(search_term, download_dir, topn)
+    else:
+        raise ValueError(f"Unsupported platform: {platform}. Use 'kaggle' or 'zenodo'.")
+
+
+def _search_kaggle(search_term, download_dir, topn):
+    """Search and download from Kaggle"""
+    api = KaggleApi()
+    api.authenticate()
     results = api.dataset_list(search=search_term, file_type="csv", sort_by="hottest")
     datasets = []
+
     for ds in results:
         ref = ds.ref
         files = api.dataset_list_files(ref).files
         csv_files = [f for f in files if f.name.lower().endswith('.csv')]
+
         if len(csv_files) != 1:
             continue
+
         csv_file = csv_files[0]
         ds_dir = os.path.join(download_dir, ref.replace('/', '__'))
         os.makedirs(ds_dir, exist_ok=True)
+
         try:
             api.dataset_download_file(ref, csv_file.name, path=ds_dir, force=True, quiet=True)
         except Exception as e:
             print(f"Failed to download {csv_file.name} from {ref}: {e}")
             continue
+
         csv_path = os.path.join(ds_dir, csv_file.name)
-        # Unzip if needed
-        if os.path.exists(csv_path + '.zip'):
-            import zipfile
-            with zipfile.ZipFile(csv_path + '.zip', 'r') as zip_ref:
-                zip_ref.extractall(ds_dir)
-            os.remove(csv_path + '.zip')
+
         datasets.append({
             "ref": ref,
-            "csv_path": os.path.join(ds_dir, csv_file.name),
+            "csv_path": csv_path,
             "title": ds.title,
         })
+
         if len(datasets) >= topn:
             break
+
+    return datasets
+
+
+def _search_zenodo(search_term, download_dir, topn):
+    """Search and download from Zenodo"""
+    url = "https://zenodo.org/api/records"
+    params = {
+        'q': search_term,
+        'sort': 'newest',
+        'size': topn * 3,
+        'type': 'dataset'
+    }
+
+    datasets = []
+    count = 0
+
+    try:
+        r = requests.get(url, params=params, timeout=30)
+        if r.status_code != 200:
+            print(f"Zenodo search failed with status {r.status_code}")
+            return datasets
+
+        data = r.json()
+        hits = data.get('hits', {}).get('hits', [])
+
+        for hit in hits:
+            if count >= topn:
+                break
+
+            record_id = hit['id']
+            title = hit['metadata']['title']
+            files = hit.get('files', [])
+
+            # Filter CSV files
+            csv_files = [f for f in files if f['key'].lower().endswith('.csv')]
+            if len(csv_files) != 1:
+                continue
+
+            csv_file = csv_files[0]
+            ds_dir = os.path.join(download_dir, f"zenodo__{record_id}")
+            os.makedirs(ds_dir, exist_ok=True)
+
+            download_url = csv_file['links']['self']
+            local_path = os.path.join(ds_dir, csv_file['key'])
+
+            try:
+                print(f"Downloading:  {csv_file['key']} from Zenodo record {record_id}")
+                r = requests.get(download_url, stream=True, timeout=120)
+                if r.status_code == 200:
+                    with open(local_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+
+                    datasets.append({
+                        "ref": f"zenodo__{record_id}",
+                        "csv_path": local_path,
+                        "title": title,
+                    })
+                    count += 1
+                else:
+                    print(f"Failed to download {csv_file['key']}:  HTTP {r.status_code}")
+            except Exception as e:
+                print(f"Error downloading {csv_file['key']}: {e}")
+
+    except Exception as e:
+        print(f"Zenodo search error: {e}")
+
     return datasets
